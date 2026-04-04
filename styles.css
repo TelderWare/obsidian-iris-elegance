@@ -1,0 +1,662 @@
+/* =============================================================
+   FRONTMATTER
+   ============================================================= */
+
+/* Make heading a horizontal row */
+body.elegance-fm-active .metadata-properties-heading {
+    display: flex;
+    align-items: center;
+    gap: 7px;
+}
+
+/* Hide the collapse indicator */
+body.elegance-fm-active .metadata-properties-heading .collapse-indicator {
+    display: none;
+}
+
+/* Shared icon base */
+body.elegance-fm-active .metadata-properties-title,
+body.elegance-fm-active .elegance-fm-action {
+    width: 18px;
+    height: 18px;
+    background-color: currentColor;
+    -webkit-mask-size: contain;
+    mask-size: contain;
+    -webkit-mask-repeat: no-repeat;
+    mask-repeat: no-repeat;
+    opacity: 0.5;
+    transition: opacity 0.15s ease;
+    flex-shrink: 0;
+}
+
+body.elegance-fm-active .metadata-properties-title:hover,
+body.elegance-fm-active .elegance-fm-action:hover {
+    opacity: 1;
+}
+
+body.elegance-fm-active .elegance-fm-action:active {
+    background-color: var(--interactive-accent);
+    opacity: 1;
+}
+
+/* List icon — restyle native "Properties" title */
+body.elegance-fm-active .metadata-properties-title {
+    font-size: 0;
+    line-height: 0;
+    padding: 0;
+    margin: 0;
+    border: 0;
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' y1='6' x2='21' y2='6'/%3E%3Cline x1='8' y1='12' x2='21' y2='12'/%3E%3Cline x1='8' y1='18' x2='21' y2='18'/%3E%3Cline x1='3' y1='6' x2='3.01' y2='6'/%3E%3Cline x1='3' y1='12' x2='3.01' y2='12'/%3E%3Cline x1='3' y1='18' x2='3.01' y2='18'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cline x1='8' y1='6' x2='21' y2='6'/%3E%3Cline x1='8' y1='12' x2='21' y2='12'/%3E%3Cline x1='8' y1='18' x2='21' y2='18'/%3E%3Cline x1='3' y1='6' x2='3.01' y2='6'/%3E%3Cline x1='3' y1='12' x2='3.01' y2='12'/%3E%3Cline x1='3' y1='18' x2='3.01' y2='18'/%3E%3C/svg%3E");
+}
+
+/* Action icons */
+body.elegance-fm-active .elegance-fm-action {
+    cursor: pointer;
+}
+
+/* Download icon (Lucide download) */
+body.elegance-fm-active .elegance-fm-download {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10 12 15 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4'/%3E%3Cpolyline points='7 10 12 15 17 10'/%3E%3Cline x1='12' y1='15' x2='12' y2='3'/%3E%3C/svg%3E");
+}
+
+/* Video icon (Lucide tv-minimal-play) */
+body.elegance-fm-active .elegance-fm-video {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15.033 9.44a.647.647 0 0 1 0 1.12l-4.065 2.352a.645.645 0 0 1-.968-.56V7.648a.645.645 0 0 1 .967-.56z'/%3E%3Cpath d='M7 21h10'/%3E%3Crect width='20' height='14' x='2' y='3' rx='2'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M15.033 9.44a.647.647 0 0 1 0 1.12l-4.065 2.352a.645.645 0 0 1-.968-.56V7.648a.645.645 0 0 1 .967-.56z'/%3E%3Cpath d='M7 21h10'/%3E%3Crect width='20' height='14' x='2' y='3' rx='2'/%3E%3C/svg%3E");
+}
+
+/* Last-reviewed icon (Lucide circle-check) */
+body.elegance-fm-active .elegance-fm-last-reviewed {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='m9 12 2 2 4-4'/%3E%3C/svg%3E");
+}
+
+/* Slides icon (Lucide presentation) */
+body.elegance-fm-active .elegance-fm-slides {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 3h20'/%3E%3Cpath d='M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3'/%3E%3Cpath d='m7 21 5-5 5 5'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M2 3h20'/%3E%3Cpath d='M21 3v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V3'/%3E%3Cpath d='m7 21 5-5 5 5'/%3E%3C/svg%3E");
+}
+
+/* Cement-embeds icon (Lucide anchor) */
+body.elegance-fm-active .elegance-fm-cement-embeds {
+    -webkit-mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22V8'/%3E%3Cpath d='M5 12H2a10 10 0 0 0 20 0h-3'/%3E%3Ccircle cx='12' cy='5' r='3'/%3E%3C/svg%3E");
+    mask-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='24' height='24' viewBox='0 0 24 24' fill='none' stroke='currentColor' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M12 22V8'/%3E%3Cpath d='M5 12H2a10 10 0 0 0 20 0h-3'/%3E%3Ccircle cx='12' cy='5' r='3'/%3E%3C/svg%3E");
+}
+
+/* =============================================================
+   SETTINGS — icon preview
+   ============================================================= */
+
+.elegance-icon-preview {
+    display: inline-flex;
+    align-items: center;
+    color: var(--text-muted);
+}
+
+.elegance-icon-preview svg {
+    width: 18px;
+    height: 18px;
+}
+
+/* =============================================================
+   ICON PICKER MODAL
+   ============================================================= */
+
+.elegance-icon-suggestion {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+}
+
+.elegance-icon-suggestion svg {
+    width: 18px;
+    height: 18px;
+    flex-shrink: 0;
+    color: var(--text-muted);
+}
+
+/* =============================================================
+   COLLAPSE PROPERTIES — CSS mask to prevent flash before JS collapse
+   ============================================================= */
+
+body.elegance-props-collapsing .metadata-container:not(.is-collapsed) > :not(.metadata-properties-heading),
+body.elegance-props-collapsing .metadata-add-button {
+    display: none;
+}
+
+/* Persistently hide the add-property button while properties are collapsed.
+   The button sits outside .metadata-container so Obsidian's own collapse
+   doesn't cover it. */
+body.elegance-props-collapsed .metadata-add-button {
+    display: none;
+}
+
+/* Hide inline titles during note switch so the real filename is never
+   painted.  The body class is added synchronously in active-leaf-change
+   and removed in a requestAnimationFrame callback after the display
+   title has been written. */
+body.elegance-title-swapping .inline-title {
+    visibility: hidden;
+}
+
+/* =============================================================
+   HIDE FRONTMATTER IN HOVER / PAGE-PREVIEW POPOVERS
+   ============================================================= */
+
+.hover-popover .metadata-container,
+.popover .metadata-container {
+    display: none !important;
+}
+
+/* =============================================================
+   HIDDEN PROPERTIES
+   ============================================================= */
+
+/* Hide properties marked as hidden (accessible clip-rect technique) */
+body:not(.elegance-show-hidden) .markdown-source-view .metadata-property.elegance-prop-hidden:not(:focus, :focus-within),
+body:not(.elegance-show-hidden) .markdown-preview-view .metadata-property.elegance-prop-hidden:not(:focus, :focus-within),
+body:not(.elegance-show-hidden) .hover-popover .metadata-property.elegance-prop-hidden:not(:focus, :focus-within) {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    margin: -1px;
+    padding: 0;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+    border: 0;
+}
+
+/* =============================================================
+   HIDDEN FOLDERS
+   ============================================================= */
+
+.nav-folder.elegance-folder-hidden {
+    display: none;
+}
+
+/* =============================================================
+   BETTER EMBEDS
+   ============================================================= */
+
+/* All embed rules exclude .hover-popover to preserve link previews */
+
+/* Remove embed container chrome */
+.markdown-reading-view .markdown-embed:not(.hover-popover .markdown-embed),
+.cm-embed-block .markdown-embed:not(.hover-popover .markdown-embed) {
+    border: none !important;
+    border-radius: 0 !important;
+    padding: 0 !important;
+    margin: 0 !important;
+    background: transparent !important;
+    box-shadow: none !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+
+/* Ensure embed block centering for themes (e.g. Minimal) that use per-element positioning */
+.cm-contentContainer > .cm-content > .cm-embed-block:has(.elegance-embed-seamless) {
+    width: var(--line-width, 100%);
+    max-width: var(--max-width, 100%);
+    margin-inline: var(--content-margin, 0);
+}
+
+/* Hide the original embed title (replaced by a heading via JS) */
+.markdown-embed:not(.hover-popover .markdown-embed) > .markdown-embed-title {
+    display: none !important;
+    height: 0 !important;
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Hide the embed link/navigation icon */
+.markdown-embed:not(.hover-popover .markdown-embed) > .markdown-embed-link {
+    display: none !important;
+}
+
+/* Remove content height constraints, scrollbars, and top spacing */
+.markdown-embed:not(.hover-popover .markdown-embed) > .markdown-embed-content,
+.markdown-embed:not(.hover-popover .markdown-embed) > .markdown-embed-content * {
+    max-height: none !important;
+    overflow: visible !important;
+}
+
+.markdown-embed:not(.hover-popover .markdown-embed) > .markdown-embed-content {
+    margin: 0 !important;
+    padding: 0 !important;
+}
+
+/* Remove internal-embed wrapper styling */
+.internal-embed.markdown-embed:not(.hover-popover .markdown-embed) {
+    border: none !important;
+    padding: 0 !important;
+}
+
+/* Remove indentation and spacing from all embedded content wrappers */
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content > *,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content .markdown-rendered,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content .markdown-preview-view,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content .markdown-preview-sizer,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content .markdown-preview-section {
+    padding-left: 0 !important;
+    padding-right: 0 !important;
+    margin-left: 0 !important;
+    margin-right: 0 !important;
+    max-height: none !important;
+    overflow: visible !important;
+}
+
+/* Remove top margin from the JS-created title heading */
+.markdown-embed > .elegance-embed-title {
+    margin-top: 0;
+    padding-top: 0;
+}
+
+/* Collapse first-child top margins inside embed content */
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content > :first-child,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content > .markdown-rendered > :first-child,
+.markdown-embed:not(.hover-popover .markdown-embed) .markdown-embed-content .markdown-preview-sizer > :first-child {
+    margin-top: 0 !important;
+}
+
+/* Position embed for nav button + accent left bar */
+.markdown-embed.elegance-embed-seamless {
+    position: relative;
+}
+
+/* Navigate-to-note icon */
+.elegance-embed-nav-btn {
+    position: absolute;
+    top: 4px;
+    right: 26px;
+    opacity: 0.15;
+    cursor: pointer;
+    color: var(--text-faint);
+    -webkit-appearance: none;
+    appearance: none;
+    background: none;
+    border: none;
+    outline: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    line-height: 0;
+    transition: opacity 150ms ease, color 150ms ease;
+    z-index: 1;
+}
+
+.elegance-embed-nav-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+/* Show on embed hover */
+.markdown-embed:hover > .elegance-embed-nav-btn {
+    opacity: 1;
+}
+
+.elegance-embed-nav-btn:hover {
+    color: var(--text-muted);
+}
+
+.elegance-embed-nav-btn:active {
+    color: var(--interactive-accent);
+}
+
+/* Transclude-snapshot icon */
+.elegance-embed-snap-btn {
+    position: absolute;
+    top: 4px;
+    right: 48px;
+    opacity: 0.15;
+    cursor: pointer;
+    color: var(--text-faint);
+    -webkit-appearance: none;
+    appearance: none;
+    background: none;
+    border: none;
+    outline: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    line-height: 0;
+    transition: opacity 150ms ease, color 150ms ease;
+    z-index: 1;
+}
+
+.elegance-embed-snap-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.markdown-embed:hover > .elegance-embed-snap-btn {
+    opacity: 1;
+}
+
+.elegance-embed-snap-btn:hover {
+    color: var(--text-muted);
+}
+
+.elegance-embed-snap-btn:active {
+    color: var(--interactive-accent);
+}
+
+/* Delete-embed icon */
+.elegance-embed-del-btn {
+    position: absolute;
+    top: 4px;
+    right: 4px;
+    opacity: 0.15;
+    cursor: pointer;
+    color: var(--text-faint);
+    -webkit-appearance: none;
+    appearance: none;
+    background: none;
+    border: none;
+    outline: none;
+    box-shadow: none;
+    padding: 0;
+    margin: 0;
+    line-height: 0;
+    transition: opacity 150ms ease, color 150ms ease;
+    z-index: 1;
+}
+
+.elegance-embed-del-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.markdown-embed:hover > .elegance-embed-del-btn {
+    opacity: 1;
+}
+
+.elegance-embed-del-btn:hover {
+    color: var(--text-muted);
+}
+
+.elegance-embed-del-btn:active {
+    color: var(--interactive-accent);
+}
+
+/* =============================================================
+   LINKS — blend with surrounding text
+   ============================================================= */
+
+.markdown-rendered a,
+.markdown-rendered a.internal-link,
+.markdown-rendered a.external-link,
+.cm-s-obsidian .cm-link,
+.cm-s-obsidian .cm-hmd-internal-link,
+.markdown-source-view .cm-link .cm-underline,
+.markdown-source-view .cm-url .cm-underline,
+.markdown-source-view .cm-hmd-internal-link .cm-underline {
+    color: inherit !important;
+    text-decoration: underline 0.5px !important;
+    text-decoration-color: color-mix(in srgb, var(--interactive-accent) 30%, transparent) !important;
+    transition: text-decoration-color 150ms ease;
+}
+
+.markdown-rendered a:hover,
+.markdown-rendered a.internal-link:hover,
+.markdown-rendered a.external-link:hover,
+.cm-s-obsidian .cm-link:hover,
+.cm-s-obsidian .cm-hmd-internal-link:hover,
+.markdown-source-view .cm-link:hover .cm-underline,
+.markdown-source-view .cm-url:hover .cm-underline,
+.markdown-source-view .cm-hmd-internal-link:hover .cm-underline {
+    text-decoration-color: var(--interactive-accent) !important;
+}
+
+/* Web view (video action) */
+.view-content:has(> iframe[src]),
+.view-content:has(> webview),
+.view-content:has(> .elegance-video-wrapper),
+.view-content:has(> .elegance-nickname-wrap) {
+    padding: 0;
+    overflow: hidden;
+    position: relative;
+}
+
+.elegance-video-wrapper {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    width: 100%;
+    height: 100%;
+    box-sizing: border-box;
+    overflow: hidden;
+}
+
+/* Nickname widget — hover-expand icon + input */
+.elegance-nickname-wrap {
+    position: absolute;
+    top: 6px;
+    right: 6px;
+    z-index: 10;
+    display: flex;
+    align-items: center;
+    overflow: hidden;
+    border-radius: 4px;
+    transition: background 150ms ease;
+}
+
+.elegance-nickname-wrap:hover,
+.elegance-nickname-wrap.is-expanded {
+    background: var(--background-primary);
+}
+
+.elegance-nickname-icon {
+    flex-shrink: 0;
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--text-muted);
+    cursor: pointer;
+}
+
+.elegance-nickname-icon:active {
+    color: var(--interactive-accent);
+}
+
+.elegance-nickname-input {
+    width: 0;
+    padding: 0;
+    opacity: 0;
+    border: none;
+    outline: none;
+    box-shadow: none;
+    background: transparent;
+    color: var(--text-normal);
+    font-size: 12px;
+    height: 28px;
+    transition: width 200ms ease, opacity 150ms ease, padding 200ms ease;
+}
+
+.elegance-nickname-wrap.is-expanded .elegance-nickname-input {
+    width: 140px;
+    padding: 2px 6px;
+    opacity: 1;
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+}
+
+.elegance-video-inner {
+    display: flex;
+    flex-direction: column;
+    width: 100%;
+    max-height: 100%;
+    flex: 1;
+    min-height: 0;
+}
+
+.elegance-video-inner webview {
+    flex: 1;
+    min-height: 0;
+    width: 100%;
+    border: none;
+    outline: none;
+    background: var(--background-primary);
+    clip-path: inset(2px 1px 1px 1px);
+    /* aspect-ratio set by JS once video metadata loads */
+}
+
+/* Loading state */
+.elegance-video-hidden {
+    display: none;
+}
+
+.elegance-video-loading {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    gap: 12px;
+    width: 100%;
+    height: 100%;
+}
+
+.elegance-video-loading-icon {
+    color: var(--text-muted);
+    animation: elegance-pulse 1.5s ease-in-out infinite;
+}
+
+.elegance-video-loading-icon svg {
+    width: 48px;
+    height: 48px;
+}
+
+@keyframes elegance-pulse {
+    0%, 100% { opacity: 0.3; transform: scale(1); }
+    50% { opacity: 1; transform: scale(1.1); }
+}
+
+.elegance-video-loading-status {
+    color: var(--text-muted);
+    font-size: var(--font-ui-small);
+    min-height: 1.2em;
+    transition: opacity 0.2s ease;
+}
+
+.elegance-video-loading-status:empty {
+    opacity: 0;
+}
+
+.elegance-video-loading-retry {
+    margin-top: 4px;
+    padding: 4px 16px;
+    font-size: var(--font-ui-small);
+    color: var(--text-muted);
+    background: var(--background-modifier-hover);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    transition: color 0.15s ease, border-color 0.15s ease;
+}
+
+.elegance-video-loading-retry:hover {
+    color: var(--text-normal);
+    border-color: var(--text-muted);
+}
+
+/* =============================================================
+   VIDEO CONTROLS
+   ============================================================= */
+
+.elegance-video-controls {
+    display: flex;
+    align-items: center;
+    gap: 4px;
+    padding: 4px 8px;
+    width: 100%;
+    box-sizing: border-box;
+    background: var(--background-secondary);
+    border-top: 1px solid var(--background-modifier-border);
+    user-select: none;
+    -webkit-user-select: none;
+    flex-shrink: 0;
+}
+
+.elegance-ctrl-btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 24px;
+    height: 24px;
+    flex-shrink: 0;
+    border-radius: var(--radius-s);
+    cursor: pointer;
+    color: var(--text-muted);
+    transition: color 0.15s ease, background-color 0.15s ease;
+}
+
+.elegance-ctrl-btn:hover {
+    color: var(--text-normal);
+    background-color: var(--background-modifier-hover);
+}
+
+.elegance-ctrl-btn:active {
+    color: var(--interactive-accent);
+}
+
+.elegance-ctrl-btn svg {
+    width: 16px;
+    height: 16px;
+}
+
+.elegance-ctrl-speed {
+    width: auto;
+    padding: 0 6px;
+    font-size: var(--font-smallest);
+    font-weight: 500;
+    font-variant-numeric: tabular-nums;
+}
+
+.elegance-seek-wrap {
+    flex: 1 1 0;
+    min-width: 0;
+    position: relative;
+    height: 12px;
+    display: flex;
+    align-items: center;
+    margin: 0 4px;
+}
+
+.elegance-ctrl-seek {
+    flex: 1 1 0;
+    width: 0;
+    height: 4px;
+    -webkit-appearance: none;
+    appearance: none;
+    background: var(--background-modifier-border);
+    border-radius: 2px;
+    outline: none;
+    cursor: pointer;
+    margin: 0;
+    position: relative;
+    z-index: 2;
+}
+
+.elegance-ctrl-seek::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    background: var(--interactive-accent);
+    cursor: pointer;
+    position: relative;
+    z-index: 3;
+}
+
+.elegance-ctrl-time {
+    font-size: var(--font-smallest);
+    color: var(--text-muted);
+    font-variant-numeric: tabular-nums;
+    white-space: nowrap;
+    flex-shrink: 0;
+}
+

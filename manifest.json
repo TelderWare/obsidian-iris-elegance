@@ -1,0 +1,9 @@
+{
+    "id": "elegance",
+    "name": "Elegance",
+    "version": "1.0.0",
+    "minAppVersion": "1.4.0",
+    "description": "Compact frontmatter with action icons, and seamless note embeds with heading-level adjustment.",
+    "author": "mgodd",
+    "isDesktopOnly": true
+}

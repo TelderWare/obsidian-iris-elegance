@@ -1,0 +1,52 @@
+<!DOCTYPE html>
+<html><head>
+<script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
+<style>
+  *{margin:0;padding:0;box-sizing:border-box}
+  html,body{width:100%;height:100%;overflow:hidden;background:transparent}
+  body{display:flex;align-items:center;justify-content:center}
+  #container{display:flex;align-items:center;justify-content:center;gap:2px;
+    max-width:100%;max-height:100%}
+  #container.single video{max-width:100%;max-height:100vh}
+  #container.dual video{max-width:50%;max-height:100vh}
+  video{background:#000;flex-shrink:1;min-width:0}
+</style>
+</head><body>
+<div id="container"></div>
+<script>
+  function attachHls(el, url) {
+    if (Hls.isSupported()) {
+      const hls = new Hls();
+      hls.loadSource(url);
+      hls.attachMedia(el);
+    } else if (el.canPlayType('application/vnd.apple.mpegurl')) {
+      el.src = url;
+    }
+  }
+
+  // Called from Obsidian with array of m3u8 URLs
+  window.eleganceLoadStreams = function(urls) {
+    const c = document.getElementById('container');
+    c.innerHTML = '';
+    c.className = urls.length >= 2 ? 'dual' : 'single';
+    const vids = [];
+    for (const url of urls) {
+      const v = document.createElement('video');
+      c.appendChild(v);
+      attachHls(v, url);
+      vids.push(v);
+    }
+    // Sync playback: first video is primary
+    if (vids.length >= 2) {
+      const primary = vids[0];
+      primary.addEventListener('play', () => vids.slice(1).forEach(v => v.play()));
+      primary.addEventListener('pause', () => vids.slice(1).forEach(v => v.pause()));
+      primary.addEventListener('seeked', () => vids.slice(1).forEach(v => { v.currentTime = primary.currentTime; }));
+      primary.addEventListener('ratechange', () => vids.slice(1).forEach(v => { v.playbackRate = primary.playbackRate; }));
+      // Mute secondary streams
+      vids.slice(1).forEach(v => { v.muted = true; });
+    }
+    window._eleganceVideos = vids;
+  };
+</script>
+</body></html>
