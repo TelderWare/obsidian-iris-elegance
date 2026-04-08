@@ -1,607 +1,994 @@
 'use strict';
 
 const { Plugin, PluginSettingTab, Setting, Menu, SuggestModal, MarkdownView, ItemView, Notice, setIcon, getIconIds, getIcon } = require('obsidian');
-const child_process = require('child_process');
-const nodePath = require('path');
-const electron = require('electron');
+const { ViewPlugin, Decoration, WidgetType, EditorView, keymap } = require('@codemirror/view');
+const { StateField, StateEffect, Prec } = require('@codemirror/state');
+const { syntaxTree } = require('@codemirror/language');
 
-const VIEW_TYPE_WEB = 'elegance-web-view';
+/* === bundled from prose.js === */
+/* ============================================================
+ * Prose Mode
+ * Always-hide markdown rendering: marks stay invisible even when
+ * the caret is inside them. Cursor steps over hidden ranges via
+ * CodeMirror's atomicRanges facet, so the editor handles snapping
+ * uniformly for arrow keys, clicks, and selection extension.
+ * ============================================================ */
 
+const setProseMode = StateEffect.define();
 
-function formatTime(s) {
-    if (!s || !isFinite(s)) return '0:00';
-    const m = Math.floor(s / 60);
-    const sec = Math.floor(s % 60);
-    return m + ':' + (sec < 10 ? '0' : '') + sec;
+const proseModeField = StateField.define({
+    create: () => false,
+    update(value, tr) {
+        for (const e of tr.effects) if (e.is(setProseMode)) value = e.value;
+        return value;
+    },
+});
+
+class ProseBulletWidget extends WidgetType {
+    constructor(ch) { super(); this.ch = ch; }
+    eq(o) { return o.ch === this.ch; }
+    toDOM() {
+        const el = document.createElement('span');
+        el.className = 'elegance-prose-bullet';
+        el.textContent = this.ch;
+        return el;
+    }
 }
 
-class EleganceWebView extends ItemView {
-    constructor(leaf, url, plugin) {
-        super(leaf);
-        this._url = url;
-        this._plugin = plugin;
-        this._title = null;
-        this._sourceFilePath = null;
-        this._isDragging = false;
-        this._lastDuration = 0;
-        this._syncInterval = null;
-    }
-    getViewType() { return VIEW_TYPE_WEB; }
-    getDisplayText() { return this._title || 'Video'; }
-    getIcon() { return 'tv-minimal-play'; }
-
-    setTitle(title) {
-        this._title = title || null;
-        if (this.nicknameInput) this.nicknameInput.value = this._title || '';
-        this.leaf.updateHeader();
-    }
-
-    getState() {
-        const state = super.getState();
-        state.url = this._url || '';
-        if (this._title) state.title = this._title;
-        if (this._sourceFilePath) state.sourceFilePath = this._sourceFilePath;
-        return state;
-    }
-
-    async setState(state, result) {
-        await super.setState(state, result);
-        if (state.url && !this._url) {
-            this._url = state.url;
-            if (this.wv) this.loadUrl(this._url);
-        }
-        if (state.title) this._title = state.title;
-        if (state.sourceFilePath) this._sourceFilePath = state.sourceFilePath;
-    }
-
-    async onOpen() {
-        // Loading overlay — shown immediately
-        this.loadingEl = this.contentEl.createEl('div', {
-            cls: 'elegance-video-loading',
-        });
-        const loadingIcon = this.loadingEl.createEl('div', {
-            cls: 'elegance-video-loading-icon',
-        });
-        setIcon(loadingIcon, 'tv-minimal-play');
-        this.loadingStatus = this.loadingEl.createEl('div', {
-            cls: 'elegance-video-loading-status',
-        });
-
-        // Wrapper (hidden until ready)
-        const wrapper = this.contentEl.createEl('div', {
-            cls: 'elegance-video-wrapper elegance-video-hidden',
-        });
-
-        // Nickname widget — hover-expand icon + input at top-right
-        // Placed on contentEl (not wrapper) so it renders above the webview's native surface
-        this.nicknameWrap = this.contentEl.createEl('div', {
-            cls: 'elegance-nickname-wrap',
-        });
-        const nicknameIcon = this.nicknameWrap.createEl('button', {
-            cls: 'elegance-nickname-icon clickable-icon',
-            attr: { 'aria-label': 'Set nickname' },
-        });
-        setIcon(nicknameIcon, 'pencil');
-        this.nicknameInput = this.nicknameWrap.createEl('input', {
-            cls: 'elegance-nickname-input',
-            type: 'text',
-            placeholder: 'Nickname…',
-        });
-        if (this._title) this.nicknameInput.value = this._title;
-
-        const commitNickname = async () => {
-            const value = this.nicknameInput.value.trim();
-            if (value === (this._title || '')) return;
-            this.setTitle(value || null);
-            if (!this._sourceFilePath || !this._plugin) return;
-            const file = this._plugin.app.vault.getAbstractFileByPath(this._sourceFilePath);
-            if (!file) return;
-            const prop = this._plugin.settings.titleProperty;
-            if (!prop) return;
-            await this._plugin.app.fileManager.processFrontMatter(file, (fm) => {
-                if (value) { fm[prop] = value; } else { delete fm[prop]; }
+class ProseCheckboxWidget extends WidgetType {
+    constructor(checked, from, to) { super(); this.checked = checked; this.from = from; this.to = to; }
+    eq(o) { return o.checked === this.checked && o.from === this.from; }
+    toDOM(view) {
+        const el = document.createElement('input');
+        el.type = 'checkbox';
+        el.checked = this.checked;
+        el.className = 'elegance-prose-checkbox';
+        el.addEventListener('mousedown', e => e.preventDefault());
+        el.addEventListener('click', e => {
+            e.preventDefault();
+            const insert = this.checked ? '[ ]' : '[x]';
+            view.dispatch({
+                changes: { from: this.from, to: this.to, insert },
+                userEvent: 'elegance-prose.toggle-task',
             });
-        };
+        });
+        return el;
+    }
+    ignoreEvent() { return false; }
+}
 
-        this.nicknameInput.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') { e.preventDefault(); this.nicknameInput.blur(); }
-            if (e.key === 'Escape') {
-                this.nicknameInput.value = this._title || '';
-                this.nicknameInput.blur();
+class ProseEmptyWidget extends WidgetType {
+    toDOM() {
+        const s = document.createElement('span');
+        s.className = 'elegance-prose-empty';
+        return s;
+    }
+    eq() { return true; }
+    ignoreEvent() { return true; }
+}
+
+class ProseFrontmatterChip extends WidgetType {
+    eq() { return true; }
+    toDOM() {
+        const el = document.createElement('div');
+        el.className = 'elegance-prose-frontmatter-chip';
+        el.textContent = 'frontmatter';
+        return el;
+    }
+    ignoreEvent() { return true; }
+}
+
+class ProseHrWidget extends WidgetType {
+    eq() { return true; }
+    toDOM() {
+        const el = document.createElement('div');
+        el.className = 'elegance-prose-hr';
+        return el;
+    }
+    ignoreEvent() { return true; }
+}
+
+const PROSE_HIDE_NODES = new Set([
+    'HeaderMark', 'EmphasisMark', 'CodeMark', 'LinkMark', 'URL',
+    'StrikethroughMark', 'HighlightMark', 'QuoteMark',
+]);
+
+const PROSE_HEADING_CLASS = {
+    ATXHeading1: 'elegance-prose-h1',
+    ATXHeading2: 'elegance-prose-h2',
+    ATXHeading3: 'elegance-prose-h3',
+    ATXHeading4: 'elegance-prose-h4',
+    ATXHeading5: 'elegance-prose-h5',
+    ATXHeading6: 'elegance-prose-h6',
+};
+
+const PROSE_WIKILINK_RE = /\[\[([^\[\]\n|]+)(\|([^\[\]\n]+))?\]\]/g;
+const PROSE_EMPTY_REPLACE = Decoration.replace({ widget: new ProseEmptyWidget(), inclusive: true });
+const PROSE_EMBED_RE = /!\[\[[^\[\]\n]+\]\]/g;
+// Inline math: $...$ with non-empty, non-whitespace-only content.
+const PROSE_MATH_RE = /\$(?!\s)([^\$\n]*[^\s\$])\$/g;
+const PROSE_BULLET_RE = /^(\s*)([-*+])(\s+)/;
+const PROSE_NUMBER_RE = /^(\s*)(\d+)([.)])(\s+)/;
+const PROSE_TASK_RE = /^(\s*[-*+]\s+)\[([ xX])\]/;
+const PROSE_COMPLETE_LINK_RE = /!?\[[^\]\n]*\]\([^)\n]*\)/g;
+const PROSE_HTML_COMMENT_RE = /<!--[\s\S]*?-->/g;
+// Frontmatter: a `---` fence at doc start through the next `---` fence.
+const PROSE_FRONTMATTER_RE = /^---\r?\n[\s\S]*?\r?\n---(\r?\n|$)/;
+
+// Block decorations (frontmatter chip, HR widget, standalone embed line) must
+// come from a StateField — CodeMirror forbids ViewPlugins from emitting them.
+function buildProseBlockDecorations(state) {
+    if (!state.field(proseModeField, false)) return Decoration.none;
+
+    const doc = state.doc;
+    const ranges = [];
+    const blockReplaced = [];
+    const isInBlockReplaced = (a, b) =>
+        blockReplaced.some(([s, e]) => a >= s && b <= e);
+
+    // YAML frontmatter
+    {
+        const head = doc.sliceString(0, Math.min(doc.length, 8000));
+        const fm = head.match(PROSE_FRONTMATTER_RE);
+        if (fm) {
+            const fmEnd = fm[0].length;
+            const to = fmEnd > 0 && doc.sliceString(fmEnd - 1, fmEnd) === '\n' ? fmEnd - 1 : fmEnd;
+            ranges.push(
+                Decoration.replace({ block: true }).range(0, to)
+            );
+            blockReplaced.push([0, fmEnd]);
+        }
+    }
+
+    // Horizontal rules — scan whole doc via syntax tree
+    syntaxTree(state).iterate({
+        from: 0, to: doc.length,
+        enter(node) {
+            if (isInBlockReplaced(node.from, node.to)) return false;
+            if (node.type.name === 'HorizontalRule') {
+                const line = doc.lineAt(node.from);
+                const lineEnd = line.to + (line.to < doc.length ? 1 : 0);
+                ranges.push(
+                    Decoration.replace({ widget: new ProseHrWidget(), block: true })
+                        .range(line.from, line.to)
+                );
+                blockReplaced.push([line.from, lineEnd]);
+                return false;
             }
-        });
-        this.nicknameInput.addEventListener('blur', () => commitNickname());
+            if (node.type.name === 'FencedCode' || node.type.name === 'CodeBlock') return false;
+        },
+    });
 
-        this.nicknameWrap.addEventListener('mouseenter', () => {
-            this.nicknameWrap.classList.add('is-expanded');
-        });
-        this.nicknameWrap.addEventListener('mouseleave', () => {
-            if (document.activeElement !== this.nicknameInput) {
-                this.nicknameWrap.classList.remove('is-expanded');
-            }
-        });
-        nicknameIcon.addEventListener('click', () => {
-            this.nicknameWrap.classList.add('is-expanded');
-            this.nicknameInput.focus();
-            this.nicknameInput.select();
-        });
-        this.nicknameInput.addEventListener('blur', () => {
-            this.nicknameWrap.classList.remove('is-expanded');
-        });
-
-        // Inner box — holds webview + controls, gets centered in wrapper
-        this.innerBox = wrapper.createEl('div', {
-            cls: 'elegance-video-inner',
-        });
-
-        // Single webview — loads the Echo360 page, then gets cleaned up via CSS
-        this.wv = this.innerBox.createEl('webview', {
-            attr: { partition: 'persist:elegance-echo360' },
-        });
-
-        // Control bar
-        this.controlBar = this.innerBox.createEl('div', {
-            cls: 'elegance-video-controls',
-        });
-
-        // Keyboard shortcuts — document-level, scoped to when this leaf is active
-        this._onKeydown = (e) => {
-            if (this.app.workspace.activeLeaf !== this.leaf) return;
-            if (this.nicknameInput && document.activeElement === this.nicknameInput) return;
-            if (e.key === ' ') { e.preventDefault(); this.execVideo('togglePlayPause'); }
-            if (e.key === 'ArrowLeft') { e.preventDefault(); this._skip(-10); }
-            if (e.key === 'ArrowRight') { e.preventDefault(); this._skip(10); }
-        };
-        document.addEventListener('keydown', this._onKeydown);
-
-        // If url was provided at construction, start loading
-        if (this._url) this.loadUrl(this._url);
+    // Standalone embeds (![[file]] alone on a line) — scan whole doc
+    const fullText = doc.sliceString(0, doc.length);
+    PROSE_EMBED_RE.lastIndex = 0;
+    let em;
+    while ((em = PROSE_EMBED_RE.exec(fullText)) !== null) {
+        const start = em.index;
+        const endE = start + em[0].length;
+        if (isInBlockReplaced(start, endE)) continue;
+        const line = doc.lineAt(start);
+        if (line.text.trim() !== em[0]) continue;
+        const lineEnd = line.to + (line.to < doc.length ? 1 : 0);
+        ranges.push(Decoration.replace({ block: true }).range(line.from, lineEnd));
+        blockReplaced.push([line.from, lineEnd]);
     }
 
-    _debugLog(msg) {
-        const fs = require('fs');
-        const logPath = nodePath.join(
-            this.app.vault.adapter.basePath,
-            this.app.vault.configDir, 'plugins', 'elegance', 'debug.log'
-        );
-        const line = new Date().toISOString() + ' ' + msg + '\n';
-        fs.appendFileSync(logPath, line);
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    return Decoration.set(ranges, true);
+}
+
+const proseBlockField = StateField.define({
+    create: state => buildProseBlockDecorations(state),
+    update(value, tr) {
+        let proseToggled = false;
+        for (const e of tr.effects) if (e.is(setProseMode)) { proseToggled = true; break; }
+        if (proseToggled || tr.docChanged) return buildProseBlockDecorations(tr.state);
+        return value;
+    },
+    provide: f => EditorView.decorations.from(f),
+});
+
+const proseBlockAtomic = EditorView.atomicRanges.of(view =>
+    view.state.field(proseBlockField, false) || Decoration.none
+);
+
+function buildProseDecorations(view) {
+    const ranges = [];
+    const atomic = [];
+    if (!view.state.field(proseModeField, false)) {
+        return { decorations: Decoration.none, atomic: Decoration.none };
     }
 
-    setLoadingStatus(text) {
-        if (this.loadingStatus) this.loadingStatus.textContent = text;
+    const doc = view.state.doc;
+    const seenHeading = new Set();
+    const seenQuote = new Set();
+    // Block-replaced regions are owned by proseBlockField; read them here so
+    // the inline pass can skip nodes that the block layer has already swallowed.
+    const blockReplaced = [];
+    const blockSet = view.state.field(proseBlockField, false);
+    if (blockSet) {
+        const cur = blockSet.iter();
+        while (cur.value !== null) {
+            blockReplaced.push([cur.from, cur.to]);
+            cur.next();
+        }
     }
+    const isInBlockReplaced = (a, b) =>
+        blockReplaced.some(([s, e]) => a >= s && b <= e);
 
-    showRetryButton(onClick) {
-        if (this._retryBtn) this._retryBtn.remove();
-        this._retryBtn = this.loadingEl.createEl('button', {
-            cls: 'elegance-video-loading-retry',
-            text: 'Retry',
-        });
-        this._retryBtn.addEventListener('click', () => {
-            this._retryBtn.remove();
-            this._retryBtn = null;
-            onClick();
-        });
-    }
+    const pushHide = (from, to) => {
+        const d = PROSE_EMPTY_REPLACE.range(from, to);
+        ranges.push(d);
+        atomic.push(d);
+    };
+    const pushWidget = (deco) => {
+        ranges.push(deco);
+        atomic.push(deco);
+    };
 
-    hideRetryButton() {
-        if (this._retryBtn) { this._retryBtn.remove(); this._retryBtn = null; }
-    }
+    for (const { from, to } of view.visibleRanges) {
+        const text = doc.sliceString(from, to);
 
-    showLoading() {
-        if (this.loadingEl) this.loadingEl.style.display = '';
-        const wrapper = this.contentEl.querySelector('.elegance-video-wrapper');
-        if (wrapper) wrapper.classList.add('elegance-video-hidden');
-    }
+        const completeLinkRanges = [];
+        PROSE_COMPLETE_LINK_RE.lastIndex = 0;
+        let lm;
+        while ((lm = PROSE_COMPLETE_LINK_RE.exec(text)) !== null) {
+            completeLinkRanges.push([from + lm.index, from + lm.index + lm[0].length]);
+        }
+        const insideCompleteLink = (a, b) =>
+            completeLinkRanges.some(([s, e]) => a >= s && b <= e);
 
-    loadUrl(url) {
-        this._url = url;
-        this._readyRetries = 0;
-        this._debugLog('loadUrl: ' + url);
+        syntaxTree(view.state).iterate({
+            from, to,
+            enter(node) {
+                const name = node.type.name;
+                if (!name) return;
+                if (isInBlockReplaced(node.from, node.to)) return false;
 
-        this.wv.setAttribute('src', url);
-        this.wv.addEventListener('dom-ready', () => {
-            const wvUrl = this.wv.getURL();
-            this._debugLog('dom-ready: ' + wvUrl);
-            if (!wvUrl || wvUrl === 'about:blank') return;
-
-            // Detect login redirect — cookies were expired
-            const lower = wvUrl.toLowerCase();
-            if (lower.includes('/login') || lower.includes('/auth') || lower.includes('/signin')) {
-                this._debugLog('login redirect detected: ' + wvUrl);
-                if (this.onLoginRequired) {
-                    this.onLoginRequired();
+                if (PROSE_HEADING_CLASS[name]) {
+                    const line = doc.lineAt(node.from);
+                    if (!seenHeading.has(line.from)) {
+                        seenHeading.add(line.from);
+                        ranges.push(Decoration.line({ class: PROSE_HEADING_CLASS[name] }).range(line.from));
+                    }
                     return;
                 }
+
+                if (name === 'Blockquote') {
+                    // Tag every line in the blockquote with a left-border class.
+                    // Inner QuoteMarks are still hidden via PROSE_HIDE_NODES below.
+                    const startLine = doc.lineAt(node.from).number;
+                    const endLine = doc.lineAt(Math.min(node.to, doc.length)).number;
+                    for (let n = startLine; n <= endLine; n++) {
+                        const line = doc.line(n);
+                        if (!seenQuote.has(line.from)) {
+                            seenQuote.add(line.from);
+                            ranges.push(Decoration.line({ class: 'elegance-prose-quote' }).range(line.from));
+                        }
+                    }
+                    return;
+                }
+
+                if (name === 'HorizontalRule') {
+                    // Handled by proseBlockField.
+                    return false;
+                }
+
+                if (name === 'InlineCode') {
+                    ranges.push(Decoration.mark({ class: 'elegance-prose-code' }).range(node.from, node.to));
+                    return;
+                }
+
+                if (name === 'FencedCode' || name === 'CodeBlock') return false;
+                if (name === 'Image') return false;
+
+                if (!PROSE_HIDE_NODES.has(name)) return;
+
+                if ((name === 'LinkMark' || name === 'URL') &&
+                    !insideCompleteLink(node.from, node.to)) return;
+
+                // Skip empty-wrapper marks like `**`, `~~~~`, `====` where
+                // there's no content between the paired marks.
+                if (name === 'EmphasisMark' || name === 'StrikethroughMark' ||
+                    name === 'HighlightMark' || name === 'CodeMark') {
+                    const p = node.node.parent;
+                    if (p && (p.to - p.from) <= 2 * (node.to - node.from)) return;
+                }
+
+                let end = node.to;
+                if (name === 'HeaderMark' && doc.sliceString(end, end + 1) === ' ') end += 1;
+                if (name === 'QuoteMark' && doc.sliceString(end, end + 1) === ' ') end += 1;
+                pushHide(node.from, end);
+            },
+        });
+
+        // Per-line markers: bullets, numbered lists, task checkboxes.
+        const startLine = doc.lineAt(from).number;
+        const endLine = doc.lineAt(Math.min(to, doc.length)).number;
+        for (let n = startLine; n <= endLine; n++) {
+            const line = doc.line(n);
+            if (isInBlockReplaced(line.from, line.to)) continue;
+            const t = line.text;
+
+            const taskM = t.match(PROSE_TASK_RE);
+            if (taskM) {
+                const bracketStart = line.from + taskM[1].length;
+                const bracketEnd = bracketStart + 3;
+                const checked = taskM[2] !== ' ';
+                pushWidget(
+                    Decoration.replace({ widget: new ProseCheckboxWidget(checked, bracketStart, bracketEnd) })
+                        .range(bracketStart, bracketEnd)
+                );
+                if (doc.sliceString(bracketEnd, bracketEnd + 1) === ' ') {
+                    pushHide(bracketEnd, bracketEnd + 1);
+                }
+                continue;
             }
 
-            this.waitForVideos();
-        });
+            const bM = t.match(PROSE_BULLET_RE);
+            if (bM) {
+                const indent = bM[1].length;
+                const markStart = line.from + indent;
+                const markEnd = markStart + 1 + bM[3].length;
+                const ch = bM[2] === '*' ? '◦' : bM[2] === '+' ? '▸' : '•';
+                pushWidget(
+                    Decoration.replace({ widget: new ProseBulletWidget(ch + ' ') }).range(markStart, markEnd)
+                );
+                continue;
+            }
+
+            const nM = t.match(PROSE_NUMBER_RE);
+            if (nM) {
+                const indent = nM[1].length;
+                const markStart = line.from + indent;
+                const markEnd = markStart + nM[2].length + 1 + nM[4].length;
+                pushWidget(
+                    Decoration.replace({ widget: new ProseBulletWidget(nM[2] + '. ') }).range(markStart, markEnd)
+                );
+            }
+        }
+
+        // Embeds: ![[file]] becomes a block decoration when alone on its line,
+        // otherwise an inline hide.
+        const embedRanges = [];
+        PROSE_EMBED_RE.lastIndex = 0;
+        let em;
+        while ((em = PROSE_EMBED_RE.exec(text)) !== null) {
+            const start = from + em.index;
+            const endE = start + em[0].length;
+            if (isInBlockReplaced(start, endE)) continue;
+            const line = doc.lineAt(start);
+            if (line.text.trim() === em[0]) {
+                // Standalone embed line is block-replaced by proseBlockField;
+                // record the range so wikilink scanning skips it.
+                const lineEnd = line.to + (line.to < doc.length ? 1 : 0);
+                embedRanges.push([line.from, lineEnd]);
+            } else {
+                embedRanges.push([start, endE]);
+                pushHide(start, endE);
+            }
+        }
+
+        // Wikilinks: [[target]] or [[target|alias]]. Hide brackets and
+        // alias prefix; the visible result is `target` or `alias`.
+        PROSE_WIKILINK_RE.lastIndex = 0;
+        let m;
+        while ((m = PROSE_WIKILINK_RE.exec(text)) !== null) {
+            const start = from + m.index;
+            const end = start + m[0].length;
+            if (embedRanges.some(([a, b]) => start >= a && end <= b)) continue;
+            if (isInBlockReplaced(start, end)) continue;
+            const target = m[1];
+            const hasAlias = m[2] !== undefined;
+            pushHide(start, start + 2);
+            pushHide(end - 2, end);
+            if (hasAlias) pushHide(start + 2, start + 2 + target.length + 1);
+        }
+
+        // Inline math: hide the `$` delimiters around non-empty content.
+        PROSE_MATH_RE.lastIndex = 0;
+        let mm;
+        while ((mm = PROSE_MATH_RE.exec(text)) !== null) {
+            const start = from + mm.index;
+            const end = start + mm[0].length;
+            if (isInBlockReplaced(start, end)) continue;
+            pushHide(start, start + 1);
+            pushHide(end - 1, end);
+        }
+
+        // HTML comments: hide the entire `<!-- ... -->` span. Multi-line
+        // comments work because we sliced the visible range as a string.
+        PROSE_HTML_COMMENT_RE.lastIndex = 0;
+        let hc;
+        while ((hc = PROSE_HTML_COMMENT_RE.exec(text)) !== null) {
+            const start = from + hc.index;
+            const end = start + hc[0].length;
+            if (isInBlockReplaced(start, end)) continue;
+            pushHide(start, end);
+        }
     }
 
-    async waitForVideos() {
-        try {
-            const videoCount = await this.wv.executeJavaScript(
-                `document.querySelectorAll('video').length`
-            );
-            this._debugLog('waitForVideos attempt ' + (this._readyRetries + 1)
-                + ' | videos: ' + videoCount);
+    ranges.sort((a, b) => a.from - b.from || a.to - b.to);
+    atomic.sort((a, b) => a.from - b.from || a.to - b.to);
+    return {
+        decorations: Decoration.set(ranges, true),
+        atomic: Decoration.set(atomic, true),
+    };
+}
 
-            if (videoCount > 0) {
-                // Videos exist — run JS cleanup + inject persistent CSS
-                await this.wv.executeJavaScript(`(function(){
-                    var videos = Array.from(document.querySelectorAll('video'));
+const proseViewPlugin = ViewPlugin.fromClass(
+    class {
+        constructor(view) {
+            const built = buildProseDecorations(view);
+            this.decorations = built.decorations;
+            this.atomic = built.atomic;
+            this._lastViewportFrom = view.viewport.from;
+            this._lastViewportTo = view.viewport.to;
+            this._lastProseOn = view.state.field(proseModeField, false);
+        }
+        update(u) {
+            const proseOn = u.view.state.field(proseModeField, false);
+            const proseToggled = proseOn !== this._lastProseOn;
+            const viewportChanged =
+                u.view.viewport.from !== this._lastViewportFrom ||
+                u.view.viewport.to !== this._lastViewportTo;
 
-                    // Mark all video ancestors with elegance-keep
-                    videos.forEach(function(v) {
-                        var el = v.parentElement;
-                        while (el && el !== document.body) {
-                            el.classList.add('elegance-keep');
-                            el = el.parentElement;
-                        }
-                    });
-
-                    // Find active streams
-                    var active = videos.filter(function(v){ return v.videoWidth > 0 && v.readyState >= 2; });
-                    var target = active.length > 0 ? active : videos;
-
-                    // If only one stream active, hide the other
-                    if (videos.length >= 2 && active.length === 1) {
-                        for (var vi = 0; vi < videos.length; vi++) {
-                            if (active.indexOf(videos[vi]) >= 0) continue;
-                            var c = videos[vi].parentElement;
-                            while (c && c !== document.body) {
-                                var sibs = c.parentElement ? c.parentElement.children : [];
-                                if (sibs.length >= 2) { c.style.display = 'none'; break; }
-                                c = c.parentElement;
-                            }
-                        }
-                    }
-
-                    // Expand ancestors to fill all available space
-                    for (var ti = 0; ti < target.length; ti++) {
-                        var el = target[ti].parentElement;
-                        while (el && el !== document.body) {
-                            el.style.cssText += 'width:100%!important;max-width:100%!important;'
-                                + 'height:100%!important;margin:0!important;padding:0!important;'
-                                + 'background:transparent!important;position:relative!important;';
-                            el = el.parentElement;
-                        }
-                        target[ti].style.cssText = 'width:100%!important;height:100%!important;display:block!important;object-fit:contain!important;';
-                    }
-
-                    // Side by side if both active
-                    if (target.length >= 2) {
-                        var p = target[0].parentElement;
-                        while (p && p !== document.body) {
-                            if (p.contains(target[1])) {
-                                p.style.display = 'flex';
-                                p.style.flexDirection = 'row';
-                                for (var ci = 0; ci < p.children.length; ci++) {
-                                    if (p.children[ci].querySelector('video') || p.children[ci].tagName === 'VIDEO') {
-                                        p.children[ci].style.flex = '1';
-                                        p.children[ci].style.minWidth = '0';
-                                    }
-                                }
-                                break;
-                            }
-                            p = p.parentElement;
-                        }
-                    }
-
-                    // Centering wrapper
-                    var cage = document.getElementById('elegance-cage');
-                    if (!cage) {
-                        cage = document.createElement('div');
-                        cage.id = 'elegance-cage';
-                        cage.classList.add('elegance-keep');
-                        while (document.body.firstChild) cage.appendChild(document.body.firstChild);
-                        document.body.appendChild(cage);
-                    }
-                    cage.style.cssText = 'width:100%!important;height:100%!important;background:transparent!important;';
-
-                    document.body.style.cssText = 'margin:0!important;padding:0!important;'
-                        + 'overflow:hidden!important;background:transparent!important;'
-                        + 'width:100%!important;height:100vh!important;';
-                })()`);
-
-                // Persistent CSS — hides UI chrome but keeps elements in DOM so SPA controls still work
-                await this.wv.insertCSS(`
-                    #elegance-cage > *:not(.elegance-keep):not(style):not(script):not(:has(video)):not(:has(canvas)) {
-                        visibility: hidden !important; position: absolute !important; pointer-events: none !important;
-                        width: 0 !important; height: 0 !important; overflow: hidden !important;
-                    }
-                    .elegance-keep > *:not(.elegance-keep):not(video):not(canvas):not(style):not(script):not(:has(video)):not(:has(canvas)) {
-                        visibility: hidden !important; position: absolute !important; pointer-events: none !important;
-                        width: 0 !important; height: 0 !important; overflow: hidden !important;
-                    }
-                    body > *:not(#elegance-cage):not(style):not(script) {
-                        visibility: hidden !important; position: absolute !important; pointer-events: none !important;
-                        width: 0 !important; height: 0 !important; overflow: hidden !important;
-                    }
-                `);
-
-                // Always start from the beginning
-                await this.wv.executeJavaScript(`(function(){
-                    var vids = Array.from(document.querySelectorAll('video'));
-                    vids.forEach(function(v){ v.currentTime = 0; });
-                })()`);
-
-                if (!this._controlsBuilt) {
-                    this.buildControlBar();
-                    this._controlsBuilt = true;
+            if (!proseOn && !proseToggled) {
+                if (this.decorations.size !== 0) {
+                    this.decorations = Decoration.none;
+                    this.atomic = Decoration.none;
                 }
-                this.startStateSync();
-                this.reveal();
+                this._lastProseOn = proseOn;
+                this._lastViewportFrom = u.view.viewport.from;
+                this._lastViewportTo = u.view.viewport.to;
                 return;
             }
-        } catch (err) {
-            this._debugLog('waitForVideos error: ' + err.message);
-        }
 
-        this._readyRetries++;
-        if (this._readyRetries < 20) {
-            setTimeout(() => this.waitForVideos(), 500);
-        } else {
-            this._debugLog('gave up waiting for videos');
-            new Notice('Elegance: no video found on page', 8000);
-        }
-    }
-
-    reveal() {
-        if (this.loadingEl) {
-            this.loadingEl.remove();
-            this.loadingEl = null;
-        }
-        const wrapper = this.contentEl.querySelector('.elegance-video-wrapper');
-        if (wrapper) wrapper.classList.remove('elegance-video-hidden');
-    }
-
-    buildControlBar() {
-        const bar = this.controlBar;
-        bar.empty();
-
-        // Play / Pause
-        this.playPauseBtn = bar.createEl('span', { cls: 'elegance-ctrl-btn', attr: { 'aria-label': 'Play / Pause' } });
-        setIcon(this.playPauseBtn, 'play');
-        this.playPauseBtn.addEventListener('click', () => this.execVideo('togglePlayPause'));
-
-        // Skip back 10s
-        const skipBack = bar.createEl('span', { cls: 'elegance-ctrl-btn', attr: { 'aria-label': 'Back 10s' } });
-        setIcon(skipBack, 'skip-back');
-        skipBack.addEventListener('click', () => this._skip(-10));
-
-        // Skip forward 10s
-        const skipFwd = bar.createEl('span', { cls: 'elegance-ctrl-btn', attr: { 'aria-label': 'Forward 10s' } });
-        setIcon(skipFwd, 'skip-forward');
-        skipFwd.addEventListener('click', () => this._skip(10));
-
-        // Seek bar
-        this.seekWrap = bar.createEl('div', { cls: 'elegance-seek-wrap' });
-        this.seekBar = this.seekWrap.createEl('input', {
-            cls: 'elegance-ctrl-seek',
-            attr: { type: 'range', min: '0', max: '1000', value: '0', step: '1' },
-        });
-        this.seekBar.addEventListener('mousedown', () => { this._isDragging = true; });
-        this.seekBar.addEventListener('input', () => {
-            if (this._isDragging && this._lastDuration) {
-                const t = (this.seekBar.value / 1000) * this._lastDuration;
-                this.timeDisplay.textContent = formatTime(t) + ' / ' + formatTime(this._lastDuration);
+            if (u.docChanged || viewportChanged || proseToggled) {
+                const built = buildProseDecorations(u.view);
+                this.decorations = built.decorations;
+                this.atomic = built.atomic;
             }
-        });
-        this.seekBar.addEventListener('change', () => {
-            this._isDragging = false;
-            if (this._lastDuration) {
-                const seekTo = (this.seekBar.value / 1000) * this._lastDuration;
-                this.execVideo('seek', seekTo);
-            }
-        });
 
-        // Time display
-        this.timeDisplay = bar.createEl('span', {
-            cls: 'elegance-ctrl-time',
-            text: '0:00 / 0:00',
-        });
-
-        // Speed — click opens menu
-        this.speedBtn = bar.createEl('span', {
-            cls: 'elegance-ctrl-btn elegance-ctrl-speed',
-            text: '1x',
-            attr: { 'aria-label': 'Playback speed' },
-        });
-        this.speedBtn.addEventListener('click', (e) => {
-            const menu = new Menu();
-            const speeds = [0.25, 0.5, 0.75, 1, 1.25, 1.5, 1.75, 2];
-            for (const s of speeds) {
-                menu.addItem((item) => {
-                    item.setTitle(s + 'x');
-                    item.onClick(() => this.execVideo('setSpeed', s).then(() => {
-                        this.speedBtn.textContent = s + 'x';
-                    }));
-                });
-            }
-            menu.showAtMouseEvent(e);
-        });
-
+            this._lastProseOn = proseOn;
+            this._lastViewportFrom = u.view.viewport.from;
+            this._lastViewportTo = u.view.viewport.to;
+        }
+    },
+    {
+        decorations: v => v.decorations,
+        provide: plugin => EditorView.atomicRanges.of(view => {
+            return view.plugin(plugin)?.atomic || Decoration.none;
+        }),
     }
+);
 
-    async execVideo(action, value) {
-        // Helper: find the active video (visible, with dimensions), fallback to first
-        const findV = `function findV(){
-            var vids = Array.from(document.querySelectorAll('video'));
-            var active = vids.filter(function(v){ return v.videoWidth > 0 && v.offsetParent !== null; });
-            return active.length > 0 ? active[0] : vids[0] || null;
-        }`;
-        const commands = {
-            togglePlayPause: `(function(){
-                // Strategy 1: click native Echo360 play/pause button
-                var btns = document.querySelectorAll('button');
-                for (var i = 0; i < btns.length; i++) {
-                    var label = (btns[i].getAttribute('aria-label') || '').toLowerCase();
-                    if (label === 'play' || label === 'pause') {
-                        btns[i].click();
-                        ${findV}
-                        var v = findV();
-                        return v ? (v.paused ? 'paused' : 'playing') : 'clicked';
-                    }
-                }
-                // Strategy 2: spacebar keydown on document
-                document.dispatchEvent(new KeyboardEvent('keydown', {
-                    key: ' ', code: 'Space', keyCode: 32, which: 32, bubbles: true
-                }));
-                ${findV}
-                var v = findV();
-                return v ? (v.paused ? 'paused' : 'playing') : 'spacebar';
-            })()`,
-            skip: `(function(){
-                ${findV}
-                var v = findV();
-                if (!v) return null;
-                v.currentTime = Math.max(0, Math.min(v.duration, v.currentTime + (${value})));
-                return v.currentTime;
-            })()`,
-            setSpeed: `new Promise(function(resolve){
-                var btn = document.getElementById('playback-speed-menu-menu-toggle-btn');
-                if (!btn) { resolve(null); return; }
-                btn.click();
-                setTimeout(function(){
-                    var target = ${value};
-                    var targetStr = target + 'x';
-                    var items = document.querySelectorAll('#playback-speed-menu li[role="menuitemradio"]');
-                    var found = false;
-                    for (var i = 0; i < items.length; i++) {
-                        if (items[i].textContent.indexOf(targetStr) >= 0) {
-                            items[i].click(); found = true; break;
-                        }
-                    }
-                    if (!found) btn.click();
-                    resolve(found ? target : null);
-                }, 300);
-            })`,
-            seek: `(function(){
-                var vids = document.querySelectorAll('video');
-                if (!vids.length) return null;
-                vids.forEach(function(v){ v.currentTime = ${value}; });
-                return vids[0].currentTime;
-            })()`,
-            getState: `(function(){
-                ${findV}
-                var v = findV();
-                if (!v) return null;
-                return {
-                    paused: v.paused,
-                    muted: v.muted,
-                    speed: v.playbackRate,
-                    currentTime: v.currentTime,
-                    duration: v.duration
-                };
-            })()`,
-        };
-        const code = commands[action];
-        if (!code) return null;
-        try {
-            return await this.wv.executeJavaScript(code, true);
-        } catch {
-            return null;
+function proseFindLinkAt(state, pos) {
+    const tree = syntaxTree(state);
+    for (const probe of [pos, pos - 1, pos + 1]) {
+        if (probe < 0 || probe > state.doc.length) continue;
+        let node = tree.resolveInner(probe, -1);
+        while (node) {
+            if (node.type.name === 'Link') return node;
+            node = node.parent;
         }
     }
+    return null;
+}
 
-    startStateSync() {
-        this._ratioApplied = false;
-        this._syncInterval = setInterval(async () => {
-            const state = await this.execVideo('getState');
-            if (!state) return;
-            this.updateIcons(state);
-            if (!this._ratioApplied) {
-                this._ratioApplied = await this._applyAspectRatio();
-            }
-        }, 1000);
-    }
+function proseLinkDisplayText(src) {
+    const m = src.match(/^\[([^\]]*)\]\([^)]*\)$/);
+    return m ? m[1] : src;
+}
 
-    async _applyAspectRatio() {
-        try {
-            const ratio = await this.wv.executeJavaScript(`(function(){
-                var v = document.querySelector('video');
-                if (!v || !v.videoWidth || !v.videoHeight) return 0;
-                return v.videoWidth / v.videoHeight;
-            })()`);
-            if (ratio > 0) {
-                this.wv.style.aspectRatio = String(ratio);
-                // Switch inner box from flex-fill to shrink-wrap
-                this.innerBox.style.flex = '0 0 auto';
-                return true;
-            }
-        } catch {}
-        return false;
-    }
-
-    _skip(seconds) {
-        if (!this._lastDuration) return;
-        const cur = (this.seekBar.value / 1000) * this._lastDuration;
-        const seekTo = Math.max(0, Math.min(this._lastDuration, cur + seconds));
-        this.seekBar.value = (seekTo / this._lastDuration) * 1000;
-        this.timeDisplay.textContent = formatTime(seekTo) + ' / ' + formatTime(this._lastDuration);
-        this.execVideo('seek', seekTo);
-    }
-
-    updateIcons(state) {
-        setIcon(this.playPauseBtn, state.paused ? 'play' : 'pause');
-        this.speedBtn.textContent = state.speed + 'x';
-
-        if (!this._isDragging && state.duration) {
-            this._lastDuration = state.duration;
-            this.seekBar.value = (state.currentTime / state.duration) * 1000;
-            this.timeDisplay.textContent = formatTime(state.currentTime) + ' / ' + formatTime(state.duration);
+function proseFindWikilinkAt(state, pos) {
+    const line = state.doc.lineAt(pos);
+    PROSE_WIKILINK_RE.lastIndex = 0;
+    let m;
+    while ((m = PROSE_WIKILINK_RE.exec(line.text)) !== null) {
+        const start = line.from + m.index;
+        const end = start + m[0].length;
+        if (pos >= start && pos <= end) {
+            const target = m[1];
+            const alias = m[3];
+            return { from: start, to: end, text: alias ?? target };
         }
     }
+    return null;
+}
 
-    async onClose() {
-        if (this._syncInterval) {
-            clearInterval(this._syncInterval);
-            this._syncInterval = null;
-        }
-        if (this._onKeydown) {
-            document.removeEventListener('keydown', this._onKeydown);
-            this._onKeydown = null;
-        }
+function proseUnwrapLinkCmd(view) {
+    if (!view.state.field(proseModeField, false)) return false;
+    const sel = view.state.selection.main;
+    if (!sel.empty) return false;
+
+    const wiki = proseFindWikilinkAt(view.state, sel.from);
+    if (wiki) {
+        view.dispatch({
+            changes: { from: wiki.from, to: wiki.to, insert: wiki.text },
+            selection: { anchor: wiki.from + wiki.text.length },
+            userEvent: 'elegance-prose.unwrap-link',
+        });
+        return true;
+    }
+
+    const link = proseFindLinkAt(view.state, sel.from);
+    if (!link) return false;
+    const src = view.state.doc.sliceString(link.from, link.to);
+    const text = proseLinkDisplayText(src);
+    view.dispatch({
+        changes: { from: link.from, to: link.to, insert: text },
+        selection: { anchor: link.from + text.length },
+        userEvent: 'elegance-prose.unwrap-link',
+    });
+    return true;
+}
+
+// Cursor snapping over hidden ranges is delegated entirely to
+// CodeMirror's atomicRanges facet (wired in proseViewPlugin's provide).
+// The atomic set is computed in lockstep with the decoration set inside
+// buildProseDecorations, so the renderer and the cursor stepper can never
+// disagree about what's hidden.
+
+const proseKeymap = Prec.high(keymap.of([
+    { key: 'Backspace', run: proseUnwrapLinkCmd },
+    { key: 'Delete', run: proseUnwrapLinkCmd },
+]));
+
+/* === bundled from modals.js === */
+class IconPickerModal extends SuggestModal {
+    constructor(app, onChoose) {
+        super(app);
+        this.onChoose = onChoose;
+        this.allIcons = getIconIds();
+        this.setPlaceholder('Search icons\u2026');
+    }
+
+    getSuggestions(query) {
+        const q = query.toLowerCase();
+        if (!q) return this.allIcons.slice(0, 100);
+        return this.allIcons.filter(id => id.toLowerCase().includes(q));
+    }
+
+    renderSuggestion(iconId, el) {
+        el.addClass('elegance-icon-suggestion');
+        const svg = getIcon(iconId);
+        if (svg) el.appendChild(svg);
+        el.createSpan({ text: iconId });
+    }
+
+    onChooseSuggestion(iconId) {
+        this.onChoose(iconId);
     }
 }
 
-/* ================================================================
-   Frontmatter action icons — config
-   ================================================================ */
+class CommandPickerModal extends SuggestModal {
+    constructor(app, onChoose) {
+        super(app);
+        this.onChoose = onChoose;
+        this.setPlaceholder('Search for a command...');
+    }
+    getSuggestions(query) {
+        const q = query.toLowerCase();
+        const cmds = Object.values(this.app.commands.commands);
+        return cmds.filter(c => c.name.toLowerCase().includes(q) || c.id.toLowerCase().includes(q))
+            .slice(0, 100);
+    }
+    renderSuggestion(cmd, el) {
+        el.createDiv({ text: cmd.name });
+        el.createDiv({ text: cmd.id, cls: 'setting-item-description' });
+    }
+    onChooseSuggestion(cmd) {
+        this.onChoose(cmd.id);
+    }
+}
 
-const FM_ACTIONS = [
-    { key: 'download', cls: 'elegance-fm-download', label: 'Open download link' },
-    { key: 'video',    cls: 'elegance-fm-video',    label: 'Open video link' },
-    { key: 'slides',   cls: 'elegance-fm-slides',   label: 'Open slideshow' },
-    { key: 'last-reviewed', cls: 'elegance-fm-last-reviewed', label: 'Mark as reviewed now', alwaysShow: true },
-    { key: 'cement-embeds', cls: 'elegance-fm-cement-embeds', label: 'Cement embeds' },
-];
-
-/* ================================================================
-   Plugin
-   ================================================================ */
-
+/* === bundled from settings.js === */
 const DEFAULT_SETTINGS = {
     hiddenProperties: [],
     propertyIcons: {},
+    actionIcons: {},
     titleProperty: 'displayTitle',
     hiddenFolders: [],
     folderDisplayNames: {},
     betterEmbeds: true,
     collapseProperties: true,
     reviewFolders: ['Lectures', 'Glossary'],
+    proseOn: false,
+    actionButtons: [
+        'elegance:open-download-link',
+        'iris-course:open-video-link',
+        'elegance:open-slideshow',
+        'elegance:mark-as-reviewed',
+        'elegance:cement-embeds',
+    ],
 };
+
+class EleganceSettingTab extends PluginSettingTab {
+    constructor(app, plugin) {
+        super(app, plugin);
+        this.plugin = plugin;
+    }
+
+    display() {
+        const { containerEl } = this;
+        containerEl.empty();
+
+        new Setting(containerEl)
+            .setName('Prose mode')
+            .setDesc('Hide markdown syntax (headings, emphasis, links) even on the active line. Toggle anytime via the ribbon icon or command palette.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.proseOn)
+                .onChange(async (value) => {
+                    this.plugin.settings.proseOn = value;
+                    this.plugin.applyProseToAll(value);
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Collapse properties')
+            .setDesc('Automatically collapse the frontmatter properties section when opening a note.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.collapseProperties)
+                .onChange(async (value) => {
+                    this.plugin.settings.collapseProperties = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Better embeds')
+            .setDesc('Seamless note embedding with heading hierarchy, click-to-edit, and accent hover bar.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.betterEmbeds)
+                .onChange(async (value) => {
+                    this.plugin.settings.betterEmbeds = value;
+                    await this.plugin.saveSettings();
+                    // Reload plugin to apply
+                    await this.plugin.app.plugins.disablePlugin('elegance');
+                    await this.plugin.app.plugins.enablePlugin('elegance');
+                }));
+
+        /* ---------- Action buttons ---------- */
+        containerEl.createEl('h3', { text: 'Action buttons' });
+        containerEl.createEl('p', {
+            text: 'Commands to expose as buttons next to the properties heading. Buttons only show when the command is currently available on the active note.',
+            cls: 'setting-item-description',
+        });
+
+        const actionButtons = this.plugin.settings.actionButtons;
+        for (let i = 0; i < actionButtons.length; i++) {
+            const id = actionButtons[i];
+            const cmd = this.plugin.app.commands.commands[id];
+            const row = new Setting(containerEl)
+                .setName(cmd ? cmd.name : id)
+                .setDesc(cmd ? id : 'Command not found')
+                .addExtraButton(btn => btn
+                    .setIcon('arrow-up')
+                    .setTooltip('Move up')
+                    .setDisabled(i === 0)
+                    .onClick(async () => {
+                        if (i === 0) return;
+                        [actionButtons[i - 1], actionButtons[i]] = [actionButtons[i], actionButtons[i - 1]];
+                        await this.plugin.saveSettings();
+                        this.plugin.updateActionIcons();
+                        this.display();
+                    }))
+                .addExtraButton(btn => btn
+                    .setIcon('arrow-down')
+                    .setTooltip('Move down')
+                    .setDisabled(i === actionButtons.length - 1)
+                    .onClick(async () => {
+                        if (i === actionButtons.length - 1) return;
+                        [actionButtons[i + 1], actionButtons[i]] = [actionButtons[i], actionButtons[i + 1]];
+                        await this.plugin.saveSettings();
+                        this.plugin.updateActionIcons();
+                        this.display();
+                    }))
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Remove')
+                    .onClick(async () => {
+                        actionButtons.splice(i, 1);
+                        await this.plugin.saveSettings();
+                        this.plugin.updateActionIcons();
+                        this.display();
+                    }));
+            const effectiveIcon = this.plugin.settings.actionIcons[id] || cmd?.icon || 'terminal';
+            const preview = row.settingEl.createSpan({ cls: 'elegance-icon-preview' });
+            row.settingEl.querySelector('.setting-item-control').prepend(preview);
+            setIcon(preview, effectiveIcon);
+            row.addExtraButton(btn => btn
+                .setIcon('pencil')
+                .setTooltip('Change icon')
+                .onClick(() => new IconPickerModal(this.plugin.app, async (iconId) => {
+                    this.plugin.settings.actionIcons[id] = iconId;
+                    await this.plugin.saveSettings();
+                    this.plugin.updateActionIcons();
+                    this.display();
+                }).open()));
+        }
+
+        new Setting(containerEl)
+            .setName('Add action button')
+            .addButton(btn => btn
+                .setButtonText('Pick command')
+                .onClick(() => {
+                    new CommandPickerModal(this.plugin.app, async (id) => {
+                        if (!actionButtons.includes(id)) {
+                            actionButtons.push(id);
+                            await this.plugin.saveSettings();
+                            // Prompt for icon selection (default/fallback = terminal)
+                            new IconPickerModal(this.plugin.app, async (iconId) => {
+                                this.plugin.settings.actionIcons[id] = iconId;
+                                await this.plugin.saveSettings();
+                                this.plugin.updateActionIcons();
+                                this.display();
+                            }).open();
+                            this.plugin.updateActionIcons();
+                            this.display();
+                        }
+                    }).open();
+                }));
+
+        /* ---------- Review folders ---------- */
+        containerEl.createEl('h3', { text: 'Review folders' });
+        containerEl.createEl('p', {
+            text: 'The "Mark as reviewed" action only appears for notes inside these folders. Leave empty to show it everywhere.',
+            cls: 'setting-item-description',
+        });
+
+        const reviewFolders = this.plugin.settings.reviewFolders;
+        for (let i = 0; i < reviewFolders.length; i++) {
+            const folder = reviewFolders[i];
+            new Setting(containerEl)
+                .setName(folder)
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Remove')
+                    .onClick(async () => {
+                        this.plugin.settings.reviewFolders.splice(i, 1);
+                        await this.plugin.saveSettings();
+                        this.plugin.updateActionIcons();
+                        this.display();
+                    }));
+        }
+
+        let newReviewFolder = '';
+        new Setting(containerEl)
+            .setName('Add folder')
+            .addText(text => text
+                .setPlaceholder('Folder name')
+                .onChange(v => { newReviewFolder = v; }))
+            .addButton(btn => btn
+                .setButtonText('+')
+                .onClick(async () => {
+                    const name = newReviewFolder.trim();
+                    if (name && !this.plugin.settings.reviewFolders.includes(name)) {
+                        this.plugin.settings.reviewFolders.push(name);
+                        await this.plugin.saveSettings();
+                        this.plugin.updateActionIcons();
+                        this.display();
+                    }
+                }));
+
+        /* ---------- Property icons ---------- */
+        containerEl.createEl('h3', { text: 'Property icons' });
+        containerEl.createEl('p', {
+            text: 'Override the default icon for a frontmatter property. Use any Lucide icon name (e.g. "calendar", "tag", "link", "flask-conical").',
+            cls: 'setting-item-description',
+        });
+
+        const iconMap = this.plugin.settings.propertyIcons;
+        for (const [prop, icon] of Object.entries(iconMap)) {
+            const row = new Setting(containerEl)
+                .setName(prop)
+                .addText(text => text
+                    .setValue(icon)
+                    .setPlaceholder('Icon name')
+                    .onChange(async (value) => {
+                        if (value.trim()) {
+                            this.plugin.settings.propertyIcons[prop] = value.trim();
+                        } else {
+                            delete this.plugin.settings.propertyIcons[prop];
+                        }
+                        await this.plugin.saveSettings();
+                        this.plugin.applyPropertyIcons();
+                        // Update preview
+                        const preview = row.settingEl.querySelector('.elegance-icon-preview');
+                        if (preview) setIcon(preview, value.trim() || 'help-circle');
+                    }))
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Remove')
+                    .onClick(async () => {
+                        delete this.plugin.settings.propertyIcons[prop];
+                        await this.plugin.saveSettings();
+                        this.plugin.applyPropertyIcons();
+                        this.display();
+                    }));
+            // Add icon preview
+            const preview = row.settingEl.createSpan({ cls: 'elegance-icon-preview' });
+            row.settingEl.querySelector('.setting-item-control').prepend(preview);
+            setIcon(preview, icon);
+        }
+
+        let newIconProp = '';
+        let newIconName = '';
+        new Setting(containerEl)
+            .setName('Add property icon')
+            .addText(text => text
+                .setPlaceholder('Property name')
+                .onChange(v => { newIconProp = v; }))
+            .addText(text => text
+                .setPlaceholder('Icon name')
+                .onChange(v => { newIconName = v; }))
+            .addButton(btn => btn
+                .setButtonText('+')
+                .onClick(async () => {
+                    if (newIconProp.trim() && newIconName.trim()) {
+                        this.plugin.settings.propertyIcons[newIconProp.trim().toLowerCase()] = newIconName.trim();
+                        await this.plugin.saveSettings();
+                        this.plugin.applyPropertyIcons();
+                        this.display();
+                    }
+                }));
+
+        /* ---------- Hidden properties ---------- */
+        containerEl.createEl('h3', { text: 'Hidden properties' });
+        containerEl.createEl('p', {
+            text: 'Properties hidden from the frontmatter panel. Right-click a property icon to hide/unhide, or manage them here.',
+            cls: 'setting-item-description',
+        });
+
+        const hiddenProps = this.plugin.settings.hiddenProperties;
+        for (let i = 0; i < hiddenProps.length; i++) {
+            const prop = hiddenProps[i];
+            new Setting(containerEl)
+                .setName(prop)
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Unhide')
+                    .onClick(async () => {
+                        this.plugin.settings.hiddenProperties.splice(i, 1);
+                        await this.plugin.saveSettings();
+                        this.plugin.markHiddenProperties();
+                        this.display();
+                    }));
+        }
+
+        let newHiddenProp = '';
+        new Setting(containerEl)
+            .setName('Hide property')
+            .addText(text => text
+                .setPlaceholder('Property name')
+                .onChange(v => { newHiddenProp = v; }))
+            .addButton(btn => btn
+                .setButtonText('+')
+                .onClick(async () => {
+                    const name = newHiddenProp.trim().toLowerCase();
+                    if (name && !this.plugin.settings.hiddenProperties.some(p => p.toLowerCase() === name)) {
+                        this.plugin.settings.hiddenProperties.push(name);
+                        await this.plugin.saveSettings();
+                        this.plugin.markHiddenProperties();
+                        this.display();
+                    }
+                }));
+
+        /* ---------- Hidden folders ---------- */
+        containerEl.createEl('h3', { text: 'Hidden folders' });
+
+        const hiddenFolders = this.plugin.settings.hiddenFolders;
+        for (let i = 0; i < hiddenFolders.length; i++) {
+            const folder = hiddenFolders[i];
+            new Setting(containerEl)
+                .setName(folder)
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Unhide')
+                    .onClick(async () => {
+                        this.plugin.settings.hiddenFolders.splice(i, 1);
+                        await this.plugin.saveSettings();
+                        this.plugin.withExplorerPaused(() => this.plugin.hideExplorerFolders());
+                        this.display();
+                    }));
+        }
+
+        let newHiddenFolder = '';
+        new Setting(containerEl)
+            .setName('Hide folder')
+            .addText(text => text
+                .setPlaceholder('Folder name')
+                .onChange(v => { newHiddenFolder = v; }))
+            .addButton(btn => btn
+                .setButtonText('+')
+                .onClick(async () => {
+                    const name = newHiddenFolder.trim();
+                    if (name && !this.plugin.settings.hiddenFolders.includes(name)) {
+                        this.plugin.settings.hiddenFolders.push(name);
+                        await this.plugin.saveSettings();
+                        this.plugin.withExplorerPaused(() => this.plugin.hideExplorerFolders());
+                        this.display();
+                    }
+                }));
+
+        /* ---------- Folder display names ---------- */
+        containerEl.createEl('h3', { text: 'Folder display names' });
+        containerEl.createEl('p', {
+            text: 'Number prefixes (e.g. "1-10, ") and module codes (e.g. "LF111 ") are stripped automatically. Add overrides below for custom names.',
+            cls: 'setting-item-description',
+        });
+
+        const map = this.plugin.settings.folderDisplayNames;
+        for (const [path, name] of Object.entries(map)) {
+            new Setting(containerEl)
+                .setName(path)
+                .addText(text => text
+                    .setValue(name)
+                    .onChange(async (value) => {
+                        if (value.trim()) {
+                            this.plugin.settings.folderDisplayNames[path] = value.trim();
+                        } else {
+                            delete this.plugin.settings.folderDisplayNames[path];
+                        }
+                        await this.plugin.saveSettings();
+                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
+                    }))
+                .addExtraButton(btn => btn
+                    .setIcon('x')
+                    .setTooltip('Remove override')
+                    .onClick(async () => {
+                        delete this.plugin.settings.folderDisplayNames[path];
+                        await this.plugin.saveSettings();
+                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
+                        this.display();
+                    }));
+        }
+
+        let newPath = '';
+        let newName = '';
+        new Setting(containerEl)
+            .setName('Add override')
+            .addText(text => text
+                .setPlaceholder('Folder path')
+                .onChange(v => { newPath = v; }))
+            .addText(text => text
+                .setPlaceholder('Display name')
+                .onChange(v => { newName = v; }))
+            .addButton(btn => btn
+                .setButtonText('+')
+                .onClick(async () => {
+                    if (newPath.trim() && newName.trim()) {
+                        this.plugin.settings.folderDisplayNames[newPath.trim()] = newName.trim();
+                        await this.plugin.saveSettings();
+                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
+                        this.display();
+                    }
+                }));
+    }
+}
+
 
 class ElegancePlugin extends Plugin {
     async onload() {
-        /* ---------- Web view ---------- */
-        this.registerView(VIEW_TYPE_WEB, (leaf) => new EleganceWebView(leaf, this._pendingUrl, this));
-
         /* ---------- Settings ---------- */
         await this.loadSettings();
+
+        /* ---------- Prose Mode ---------- */
+        this.registerEditorExtension([proseModeField, proseBlockField, proseViewPlugin, proseBlockAtomic, proseKeymap]);
+
+        this.app.workspace.onLayoutReady(() => this.applyProseToAll(this.settings.proseOn));
+        this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.applyProseToAll(this.settings.proseOn)));
+        this.registerEvent(this.app.workspace.on('layout-change', () => this.applyProseToAll(this.settings.proseOn)));
+        this.addCommand({
+            id: 'toggle-prose-mode',
+            name: 'Toggle prose mode',
+            callback: () => this.toggleProseMode(),
+        });
+
+        /* ---------- Action commands ---------- */
+        this.registerActionCommands();
+        this.proseRibbonEl = this.addRibbonIcon('book-open', this.settings.proseOn ? 'Exit prose mode' : 'Enter prose mode', () => this.toggleProseMode());
 
         /* ---------- Frontmatter ---------- */
         document.body.classList.add('elegance-fm-active');
@@ -618,29 +1005,7 @@ class ElegancePlugin extends Plugin {
             this.setupExplorerObserver();
             this.setupPropertyIconObserver();
             setTimeout(() => this.collapseAllProperties(), 200);
-
-            // Re-attach login handlers to restored video views
-            this.app.workspace.getLeavesOfType(VIEW_TYPE_WEB).forEach(leaf => {
-                const view = leaf.view;
-                if (view._url && view._url.includes('echo360')) {
-                    view.onLoginRequired = async () => {
-                        this._echo360Authenticated = false;
-                        view.showLoading();
-                        const onProgress = (msg) => view.setLoadingStatus?.(msg);
-                        try {
-                            await this.echo360Login(onProgress);
-                            onProgress('Loading video...');
-                            view.loadUrl(view._url);
-                        } catch (err) {
-                            onProgress('Login failed — ' + err.message);
-                        }
-                    };
-                }
-            });
         });
-
-        // Keep Echo360 session alive with periodic pings (every 10 min)
-        this._keepAliveInterval = setInterval(() => this._echo360KeepAlive(), 10 * 60 * 1000);
 
         this.registerEvent(
             this.app.workspace.on('active-leaf-change', () => {
@@ -650,26 +1015,23 @@ class ElegancePlugin extends Plugin {
                 if (this.settings.titleProperty) {
                     document.body.classList.add('elegance-title-swapping');
                 }
-                this.updateActionIcons();
-                this.markHiddenProperties();
-                this.applyPropertyIcons();
-                this.updateAllDisplayTitles();
+                this.refreshNoteUI();
                 if (this.settings.titleProperty) {
                     requestAnimationFrame(() => {
                         this.updateAllDisplayTitles();
                         document.body.classList.remove('elegance-title-swapping');
                     });
                 }
-                setTimeout(() => {
-                    this.collapseAllProperties();
-                }, 50);
+                setTimeout(() => this.collapseAllProperties(), 50);
             })
         );
         this.registerEvent(
             this.app.metadataCache.on('changed', (file) => {
-                this.updateActionIcons();
-                this.markHiddenProperties();
-                this.applyPropertyIcons();
+                if (file === this.app.workspace.getActiveFile()) {
+                    this.updateActionIcons();
+                    this.markHiddenProperties();
+                    this.applyPropertyIcons();
+                }
                 this.updateDisplayTitleForFile(file);
             })
         );
@@ -685,11 +1047,7 @@ class ElegancePlugin extends Plugin {
                     this.updateAllDisplayTitles();
                     this.markHiddenProperties();
                     this.applyPropertyIcons();
-                    // If explorer observer isn't set up yet (panel opened after startup), try now
-                    if (!this.explorerObserver) {
-                        this.setupExplorerObserver();
-                    }
-                    // Fallback: update folders on layout-change in case observer misses expand/collapse
+                    if (!this.explorerObserver) this.setupExplorerObserver();
                     this.withExplorerPaused(() => this.updateExplorerFolders());
                 }, 100);
             })
@@ -779,20 +1137,53 @@ class ElegancePlugin extends Plugin {
         await this.saveData(this.settings);
     }
 
-    onunload() {
-        /* Echo360 keep-alive cleanup */
-        if (this._keepAliveInterval) {
-            clearInterval(this._keepAliveInterval);
-            this._keepAliveInterval = null;
+    async toggleProseMode() {
+        this.settings.proseOn = !this.settings.proseOn;
+        this.applyProseToAll(this.settings.proseOn);
+        if (this.proseRibbonEl) {
+            const label = this.settings.proseOn ? 'Exit prose mode' : 'Enter prose mode';
+            this.proseRibbonEl.setAttribute('aria-label', label);
+            this.proseRibbonEl.setAttribute('data-tooltip', label);
         }
+        await this.saveSettings();
+        new Notice(`Prose mode ${this.settings.proseOn ? 'on' : 'off'}`);
+    }
 
-        /* Frontmatter cleanup */
-        document.body.classList.remove('elegance-fm-active');
-        document.body.classList.remove('elegance-show-hidden');
-        document.body.classList.remove('elegance-props-collapsing');
-        document.body.classList.remove('elegance-props-collapsed');
-        document.body.classList.remove('elegance-title-swapping');
-        document.querySelectorAll('.elegance-fm-action').forEach(el => el.remove());
+    applyProseToAll(on) {
+        document.body.classList.toggle('elegance-prose-on', !!on);
+        this.app.workspace.iterateAllLeaves(leaf => {
+            const view = leaf.view;
+            const cm = view?.editor?.cm;
+            if (!cm) return;
+            if (cm.state.field(proseModeField, false) === on) return;
+            cm.dispatch({ effects: setProseMode.of(on) });
+        });
+    }
+
+/** Run the standard set of per-note refreshes (icons, hidden props, titles). */
+    refreshNoteUI() {
+        this.updateActionIcons();
+        this.markHiddenProperties();
+        this.applyPropertyIcons();
+        this.updateAllDisplayTitles();
+    }
+
+    onunload() {
+        for (const cls of [
+            'elegance-fm-active',
+            'elegance-show-hidden',
+            'elegance-props-collapsing',
+            'elegance-props-collapsed',
+            'elegance-title-swapping',
+            'elegance-prose-on',
+        ]) document.body.classList.remove(cls);
+
+        for (const sel of [
+            '.elegance-fm-action',
+            '.elegance-embed-title',
+            '.elegance-embed-btn',
+        ]) document.querySelectorAll(sel).forEach(el => el.remove());
+
         document.querySelectorAll('.elegance-prop-hidden').forEach(el => {
             el.classList.remove('elegance-prop-hidden');
         });
@@ -802,18 +1193,10 @@ class ElegancePlugin extends Plugin {
             el.removeAttribute('data-elegance-icon');
         });
 
-        /* Display title cleanup — restore original titles */
         this.restoreAllDisplayTitles();
         this.restoreExplorerFolders();
 
-        /* Embed cleanup */
-        document.querySelectorAll('.elegance-embed-title').forEach(el => el.remove());
-        document.querySelectorAll('.elegance-embed-nav-btn').forEach(el => el.remove());
         document.querySelectorAll('.elegance-embed-seamless').forEach(el => {
-            el.style.borderLeft = '';
-            el.style.marginLeft = '';
-            el.style.paddingLeft = '';
-            el.style.borderLeftColor = '';
             el.classList.remove('elegance-embed-seamless');
         });
     }
@@ -822,104 +1205,182 @@ class ElegancePlugin extends Plugin {
        Frontmatter — action icons
        ============================================================ */
 
+    registerActionCommands() {
+        this.addCommand({
+            id: 'open-download-link',
+            name: 'Open download link',
+            icon: 'download',
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file) return false;
+                const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.download;
+                if (!raw || typeof raw !== 'string' || !raw.trim()) return false;
+                if (!checking) window.open(raw.trim(), '_blank');
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'open-slideshow',
+            name: 'Open slideshow',
+            icon: 'monitor-play',
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file) return false;
+                const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.slides;
+                if (!raw || typeof raw !== 'string' || !raw.trim()) return false;
+                const path = this.resolveSlidesPath(raw, file);
+                if (!path || typeof path !== 'string') return false;
+                if (!checking) this.openSlideshow(path.trim(), file);
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'mark-as-reviewed',
+            name: 'Mark as reviewed',
+            icon: 'check-circle',
+            checkCallback: (checking) => {
+                const file = this.app.workspace.getActiveFile();
+                if (!file) return false;
+                const folders = this.settings.reviewFolders;
+                const ok = folders.length === 0 || folders.some(f => file.path.startsWith(f + '/'));
+                if (!ok) return false;
+                if (!checking) this.setLastReviewed(file);
+                return true;
+            },
+        });
+
+        this.addCommand({
+            id: 'cement-embeds',
+            name: 'Cement embeds',
+            icon: 'anchor',
+            checkCallback: (checking) => {
+                const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+                if (!view || !view.file) return false;
+                const mode = view.getMode?.() ?? view.currentMode?.type;
+                if (mode !== 'source') return false;
+                const file = view.file;
+                const cache = this.app.metadataCache.getFileCache(file);
+                const has = cache?.embeds?.some(e => {
+                    const dest = this.app.metadataCache.getFirstLinkpathDest(e.link.split('#')[0], file.path);
+                    return dest && dest.extension === 'md';
+                });
+                if (!has) return false;
+                if (!checking) this.cementAllEmbeds(file);
+                return true;
+            },
+        });
+    }
+
     updateActionIcons() {
-        const leaves = this.app.workspace.getLeavesOfType('markdown');
-        if (!leaves.length) { this.clearActionIcons(); return; }
+        const view = this.app.workspace.getActiveViewOfType(MarkdownView);
+        // Only clear icons in the active view's container, so inactive leaves
+        // keep their previously-rendered icons until they next become active.
+        if (!view?.containerEl) return;
+        view.containerEl.querySelectorAll('.elegance-fm-actions').forEach(el => el.remove());
 
-        for (const leaf of leaves) {
-            const view = leaf.view;
-            const file = view?.file;
-            if (!file) continue;
+        const ids = this.settings.actionButtons || [];
+        if (!ids.length) return;
 
-            const frontmatter = this.app.metadataCache.getFileCache(file)?.frontmatter;
-            const heading = view.containerEl.querySelector('.metadata-properties-heading');
-            if (!heading) continue;
+        if (!view) return;
+        const heading = view.containerEl?.querySelector('.metadata-properties-heading');
+        if (!heading) return;
 
-            // Match action icon color to the native properties title
-            const titleEl = heading.querySelector('.metadata-properties-title');
-            const titleColor = titleEl ? getComputedStyle(titleEl).color : null;
+        const titleEl = heading.querySelector('.metadata-properties-title');
+        const titleCs = titleEl ? getComputedStyle(titleEl) : null;
+        const titleColor = titleCs ? titleCs.color : null;
+        const titleW = titleCs ? titleCs.width : null;
+        const titleH = titleCs ? titleCs.height : null;
 
-            for (const action of FM_ACTIONS) {
-                const url = frontmatter?.[action.key];
-                const resolved = action.key === 'video' ? this.resolveVideoUrl(url, file)
-                               : action.key === 'slides' ? this.resolveSlidesPath(url, file)
-                               : url;
-                const videoFile = action.key === 'video' ? this.resolveVideoFile(url, file) : null;
-                const existing = heading.querySelector(`.${action.cls}`);
-                let shouldShow = action.alwaysShow || (resolved && typeof resolved === 'string' && resolved.trim());
-                if (action.key === 'last-reviewed') {
-                    const folders = this.settings.reviewFolders;
-                    shouldShow = folders.length === 0 || folders.some(f => file.path.startsWith(f + '/'));
-                }
-                if (action.key === 'cement-embeds') {
-                    const mode = view.getMode?.() ?? view.currentMode?.type;
-                    const cache = this.app.metadataCache.getFileCache(file);
-                    shouldShow = mode === 'source' && (cache?.embeds?.some(e => {
-                        const dest = this.app.metadataCache.getFirstLinkpathDest(e.link.split('#')[0], file.path);
-                        return dest && dest.extension === 'md';
-                    }) ?? false);
-                }
+        heading.parentElement.classList.add('elegance-fm-heading-row');
+        let container = heading.parentElement.querySelector(':scope > .elegance-fm-actions');
+        if (!container) {
+            container = document.createElement('div');
+            container.className = 'elegance-fm-actions';
+            heading.insertAdjacentElement('afterend', container);
+        }
+        container.innerHTML = '';
+        // Mirror the heading's box + internal spacing so the two siblings
+        // render as if they were a single continuous row.
+        const cs = getComputedStyle(heading);
+        const gap = cs.columnGap && cs.columnGap !== 'normal' ? cs.columnGap : cs.gap;
+        Object.assign(container.style, {
+            height: cs.height,
+            minHeight: cs.minHeight,
+            marginTop: cs.marginTop,
+            marginBottom: cs.marginBottom,
+            marginLeft: gap || cs.gap || '7px',
+            paddingTop: cs.paddingTop,
+            paddingBottom: cs.paddingBottom,
+            paddingLeft: '0px',
+            paddingRight: cs.paddingRight,
+            gap: gap || cs.gap || '7px',
+            font: cs.font,
+            lineHeight: cs.lineHeight,
+            boxSizing: cs.boxSizing,
+        });
 
-                if (shouldShow) {
-                    if (existing) {
-                        if (resolved && typeof resolved === 'string') existing._eleganceUrl = resolved.trim();
-                        existing._eleganceFile = file;
-                        if (videoFile) existing._eleganceVideoFile = videoFile;
-                        if (titleColor) existing.style.color = titleColor;
-                    } else {
-                        const icon = document.createElement('span');
-                        icon.className = `elegance-fm-action ${action.cls}`;
-                        icon.setAttribute('aria-label', action.label);
-                        if (resolved && typeof resolved === 'string') icon._eleganceUrl = resolved.trim();
-                        icon._eleganceFile = file;
-                        if (videoFile) icon._eleganceVideoFile = videoFile;
-                        if (titleColor) icon.style.color = titleColor;
-                        icon.addEventListener('click', (evt) => {
-                            evt.stopPropagation();
-                            evt.preventDefault();
-                            if (action.key === 'video') {
-                                this.openWebView(icon._eleganceUrl, icon._eleganceVideoFile || icon._eleganceFile);
-                            } else if (action.key === 'slides') {
-                                this.openSlideshow(icon._eleganceUrl, icon._eleganceFile);
-                            } else if (action.key === 'last-reviewed') {
-                                this.setLastReviewed(icon._eleganceFile);
-                            } else if (action.key === 'cement-embeds') {
-                                this.cementAllEmbeds(icon._eleganceFile);
-                            } else {
-                                window.open(icon._eleganceUrl, '_blank');
-                            }
-                        });
-                        heading.appendChild(icon);
-                    }
-                } else if (existing) {
-                    existing.remove();
-                }
+        for (const id of ids) {
+            const cmd = this.app.commands.commands[id];
+            if (!cmd) continue;
+
+            let available = true;
+            if (typeof cmd.checkCallback === 'function') {
+                available = !!cmd.checkCallback(true);
+            } else if (typeof cmd.editorCheckCallback === 'function') {
+                const editor = view.editor;
+                available = editor ? !!cmd.editorCheckCallback(true, editor, view) : false;
             }
+            if (!available) continue;
+
+            const icon = document.createElement('span');
+            icon.className = 'elegance-fm-action';
+            icon.setAttribute('aria-label', cmd.name);
+            icon.dataset.commandId = id;
+            const iconName = this.settings.actionIcons[id] || cmd.icon || 'terminal';
+            setIcon(icon, iconName);
+            icon.addEventListener('click', () => {
+                this.app.commands.executeCommandById(id);
+            });
+            icon.addEventListener('contextmenu', (evt) => {
+                evt.stopPropagation();
+                evt.preventDefault();
+                const menu = new Menu();
+                menu.addItem(item => item
+                    .setTitle('Change icon')
+                    .setIcon('pencil')
+                    .onClick(() => new IconPickerModal(this.app, async (iconId) => {
+                        this.settings.actionIcons[id] = iconId;
+                        await this.saveSettings();
+                        this.updateActionIcons();
+                    }).open()));
+                if (this.settings.actionIcons[id]) {
+                    menu.addItem(item => item
+                        .setTitle('Reset icon')
+                        .setIcon('rotate-ccw')
+                        .onClick(async () => {
+                            delete this.settings.actionIcons[id];
+                            await this.saveSettings();
+                            this.updateActionIcons();
+                        }));
+                }
+                menu.showAtMouseEvent(evt);
+            });
+            if (titleColor) icon.style.color = titleColor;
+            if (titleW) icon.style.width = titleW;
+            if (titleH) icon.style.height = titleH;
+            const svg = icon.querySelector('svg');
+            if (svg && titleW && titleH) {
+                svg.style.width = titleW;
+                svg.style.height = titleH;
+            }
+            container.appendChild(icon);
         }
     }
 
     clearActionIcons() {
-        document.querySelectorAll('.elegance-fm-action').forEach(el => el.remove());
-    }
-
-    resolveVideoUrl(raw, sourceFile) {
-        if (!raw || typeof raw !== 'string') return raw;
-        const m = raw.trim().match(/^\[\[([^\]]+)\]\]$/);
-        if (!m) return raw;
-        const linkPath = m[1].split('#')[0].split('|')[0];
-        const target = this.app.metadataCache.getFirstLinkpathDest(linkPath, sourceFile.path);
-        if (!target) return raw;
-        const fm = this.app.metadataCache.getFileCache(target)?.frontmatter;
-        return fm?.video && typeof fm.video === 'string' ? fm.video.trim() : raw;
-    }
-
-    /** Return the file whose frontmatter actually holds the video URL. */
-    resolveVideoFile(raw, sourceFile) {
-        if (!raw || typeof raw !== 'string') return sourceFile;
-        const m = raw.trim().match(/^\[\[([^\]]+)\]\]$/);
-        if (!m) return sourceFile;
-        const linkPath = m[1].split('#')[0].split('|')[0];
-        return this.app.metadataCache.getFirstLinkpathDest(linkPath, sourceFile.path) || sourceFile;
+        document.querySelectorAll('.elegance-fm-actions').forEach(el => el.remove());
     }
 
     /**
@@ -970,249 +1431,17 @@ class ElegancePlugin extends Plugin {
         });
     }
 
-    async openWebView(url, sourceFile) {
-        const fs = require('fs');
-        const logPath = nodePath.join(
-            this.app.vault.adapter.basePath,
-            this.app.vault.configDir, 'plugins', 'elegance', 'debug.log'
-        );
-        const log = (msg) => fs.appendFileSync(logPath, new Date().toISOString() + ' ' + msg + '\n');
-
-        log('openWebView called: ' + url);
-
-        // Open the leaf immediately so the loading icon is visible
-        this._pendingUrl = null;
-        const leaf = this.app.workspace.getLeaf('split', 'vertical');
-        await leaf.setViewState({ type: VIEW_TYPE_WEB, active: true });
-        this.app.workspace.revealLeaf(leaf);
-
-        const view = leaf.view;
-        log('view type: ' + (view?.getViewType?.() || 'unknown') + ' hasLoadUrl: ' + !!view?.loadUrl);
-
-        // Apply display title from source note
-        if (sourceFile && view) {
-            view._sourceFilePath = sourceFile.path;
-            const title = this.getDisplayTitle(sourceFile);
-            if (title) view.setTitle(title);
-        }
-
-        const doLogin = async () => {
-            const onProgress = (msg) => view.setLoadingStatus?.(msg);
-            view.hideRetryButton();
-            try {
-                await this.echo360Login(onProgress);
-                log('login succeeded');
-                onProgress('Loading video...');
-            } catch (err) {
-                log('login failed: ' + err.message);
-                onProgress('Login failed — ' + err.message);
-                view.showRetryButton(() => {
-                    view.setLoadingStatus?.('');
-                    doLogin().then((ok) => {
-                        if (!ok) return;
-                        log('retry: calling view.loadUrl...');
-                        view.loadUrl(url);
-                    });
-                });
-                return false;
-            }
-            return true;
-        };
-
-        if (url.includes('echo360')) {
-            // Check cookie status — skip login, preemptively refresh, or do full login
-            const cookieStatus = await this._echo360CookieStatus();
-            log('echo360 cookie status: ' + cookieStatus);
-
-            if (cookieStatus === 'valid') {
-                log('skipping login — cookies valid');
-                view.setLoadingStatus?.('Loading video...');
-            } else if (cookieStatus === 'expiring-soon') {
-                log('cookies expiring soon — preemptive refresh');
-                view.setLoadingStatus?.('Refreshing session...');
-                const ok = await doLogin();
-                if (!ok) return;
-            } else {
-                log('starting login...');
-                const ok = await doLogin();
-                if (!ok) return;
-            }
-
-            // If the webview gets redirected to a login page, re-authenticate
-            view.onLoginRequired = async () => {
-                log('login redirect detected — re-authenticating');
-                this._echo360Authenticated = false;
-                view.showLoading();
-                const ok = await doLogin();
-                if (!ok) return;
-                log('re-auth done, reloading...');
-                view.loadUrl(url);
-            };
-        }
-
-        // Now load the actual URL
-        log('calling view.loadUrl...');
-        view.loadUrl(url);
-    }
-
-    /**
-     * Returns 'valid', 'expiring-soon', or 'none'.
-     * 'expiring-soon' means at least one cookie expires within 15 minutes.
-     */
-    async _echo360CookieStatus() {
-        const ses = electron.remote
-            ? electron.remote.session.fromPartition('persist:elegance-echo360')
-            : electron.session?.fromPartition('persist:elegance-echo360');
-        if (!ses) return 'none';
-        try {
-            const cookies = await ses.cookies.get({ domain: 'echo360.org.uk' });
-            if (cookies.length === 0) return 'none';
-            const now = Date.now() / 1000;
-            const soonSec = 15 * 60; // 15 minutes
-            const expiring = cookies.some(c =>
-                c.expirationDate && (c.expirationDate - now) < soonSec
-            );
-            return expiring ? 'expiring-soon' : 'valid';
-        } catch {
-            return 'none';
-        }
-    }
-
-    async _echo360KeepAlive() {
-        if (!this._echo360Authenticated) return;
-        const ses = electron.remote
-            ? electron.remote.session.fromPartition('persist:elegance-echo360')
-            : electron.session?.fromPartition('persist:elegance-echo360');
-        if (!ses) return;
-        try {
-            const cookies = await ses.cookies.get({ domain: 'echo360.org.uk' });
-            if (cookies.length === 0) return;
-            // Fire a lightweight request using the session's cookies to keep alive
-            const { net } = electron.remote || electron;
-            const req = net.request({
-                method: 'HEAD',
-                url: 'https://echo360.org.uk',
-                partition: 'persist:elegance-echo360',
-            });
-            req.on('error', () => {}); // swallow errors silently
-            req.end();
-        } catch {}
-    }
-
-    async echo360Login(onProgress) {
-        onProgress?.('Reading credentials...');
-
-        // Read credentials from Iris's settings
-        const irisDataPath = nodePath.join(
-            this.app.vault.adapter.basePath,
-            this.app.vault.configDir, 'plugins', 'iris', 'data.json'
-        );
-        let irisData;
-        try {
-            const raw = require('fs').readFileSync(irisDataPath, 'utf8');
-            irisData = JSON.parse(raw);
-        } catch {
-            throw new Error('Could not read Iris settings — is the Iris plugin installed?');
-        }
-
-        const email = irisData.echo360?.email;
-        const password = irisData.echo360?.password;
-        if (!email || !password) {
-            throw new Error('No Echo360 credentials found in Iris settings.');
-        }
-
-        const scriptPath = nodePath.join(
-            this.app.vault.adapter.basePath,
-            this.manifest.dir, 'echo360_login.py'
-        );
-
-        onProgress?.('Launching browser...');
-
-        const result = await this.execPythonStreaming(scriptPath, [], onProgress,
-            JSON.stringify({ email, password }));
-
-        if (!result || result.status !== 'success' || !result.cookies) {
-            throw new Error(result?.message || 'Login returned unexpected response');
-        }
-
-        onProgress?.('Injecting session...');
-
-        // Inject cookies into the webview partition
-        const ses = electron.remote
-            ? electron.remote.session.fromPartition('persist:elegance-echo360')
-            : electron.session?.fromPartition('persist:elegance-echo360');
-
-        if (ses) {
-            for (const c of result.cookies) {
-                const cookie = {
-                    url: `https://${c.domain.replace(/^\./, '')}`,
-                    name: c.name,
-                    value: c.value,
-                    domain: c.domain,
-                    path: c.path || '/',
-                    secure: c.secure ?? true,
-                    httpOnly: c.httpOnly ?? false,
-                };
-                // Preserve expiry so we can detect soon-to-expire cookies
-                if (c.expiry) cookie.expirationDate = c.expiry;
-                await ses.cookies.set(cookie);
-            }
-        }
-
-        this._echo360Authenticated = true;
-    }
-
-    execPythonStreaming(scriptPath, args, onProgress, stdinData) {
-        return new Promise((resolve, reject) => {
-            const proc = child_process.spawn('python', [scriptPath, ...args], {
-                windowsHide: true,
-            });
-            if (stdinData) {
-                proc.stdin.write(stdinData);
-                proc.stdin.end();
-            }
-            let buffer = '';
-            let finalResult = null;
-
-            proc.stdout.on('data', (d) => {
-                buffer += d.toString();
-                const lines = buffer.split('\n');
-                buffer = lines.pop(); // keep incomplete line in buffer
-                for (const line of lines) {
-                    if (!line.trim()) continue;
-                    try {
-                        const msg = JSON.parse(line);
-                        if (msg.status === 'progress') {
-                            onProgress?.(msg.message);
-                        } else if (msg.status === 'success' || msg.status === 'error') {
-                            finalResult = msg;
-                        }
-                    } catch {}
-                }
-            });
-
-            proc.on('close', () => {
-                // Process any remaining data in buffer
-                if (buffer.trim()) {
-                    try {
-                        const msg = JSON.parse(buffer);
-                        if (msg.status === 'success' || msg.status === 'error') {
-                            finalResult = msg;
-                        }
-                    } catch {}
-                }
-                resolve(finalResult);
-            });
-            proc.on('error', (err) => { reject(err); });
-        });
-    }
 
     /** Add "Change icon" / "Reset icon" items to a Menu for the given property key */
     _addIconMenuItems(menu, key) {
         menu.addItem(item => {
             item.setTitle('Change icon')
                 .setIcon('pencil')
-                .onClick(() => new IconPickerModal(this.app, this, key).open());
+                .onClick(() => new IconPickerModal(this.app, async (iconId) => {
+                    this.settings.propertyIcons[key.toLowerCase()] = iconId;
+                    await this.saveSettings();
+                    this.applyPropertyIcons();
+                }).open());
         });
         const lowerKey = key.toLowerCase();
         if (this.settings.propertyIcons[lowerKey]) {
@@ -1230,24 +1459,18 @@ class ElegancePlugin extends Plugin {
         const isHidden = this.settings.hiddenProperties
             .some(p => p.toLowerCase() === lowerKey);
         menu.addItem(item => {
-            if (isHidden) {
-                item.setTitle('Unhide property')
-                    .setIcon('eye')
-                    .onClick(async () => {
+            item.setTitle(isHidden ? 'Unhide property' : 'Hide property')
+                .setIcon(isHidden ? 'eye' : 'eye-off')
+                .onClick(async () => {
+                    if (isHidden) {
                         this.settings.hiddenProperties = this.settings.hiddenProperties
                             .filter(p => p.toLowerCase() !== lowerKey);
-                        await this.saveSettings();
-                        this.markHiddenProperties();
-                    });
-            } else {
-                item.setTitle('Hide property')
-                    .setIcon('eye-off')
-                    .onClick(async () => {
+                    } else {
                         this.settings.hiddenProperties.push(lowerKey);
-                        await this.saveSettings();
-                        this.markHiddenProperties();
-                    });
-            }
+                    }
+                    await this.saveSettings();
+                    this.markHiddenProperties();
+                });
         });
     }
 
@@ -1375,46 +1598,17 @@ class ElegancePlugin extends Plugin {
         return fm?.[prop] ?? null;
     }
 
-    updateAllDisplayTitles() {
+    /** Update display titles. If `file` is given, only update leaves for that file. */
+    updateDisplayTitles(file = null) {
         this.app.workspace.getLeavesOfType('markdown').forEach(leaf => {
+            if (file && leaf.view?.file?.path !== file.path) return;
             this.updateLeafDisplayTitle(leaf);
         });
-        this.updateVideoTitles();
-        this.withExplorerPaused(() => {
-            this.updateExplorerTitles();
-        });
+        this.withExplorerPaused(() => this.updateExplorerTitles());
     }
 
-    updateDisplayTitleForFile(file) {
-        this.app.workspace.getLeavesOfType('markdown').forEach(leaf => {
-            if (leaf.view?.file?.path === file.path) {
-                this.updateLeafDisplayTitle(leaf);
-            }
-        });
-        this.updateVideoTitlesForFile(file);
-        this.withExplorerPaused(() => {
-            this.updateExplorerTitles();
-        });
-    }
-
-    updateVideoTitles() {
-        this.app.workspace.getLeavesOfType(VIEW_TYPE_WEB).forEach(leaf => {
-            const view = leaf.view;
-            if (!view?._sourceFilePath) return;
-            const file = this.app.vault.getAbstractFileByPath(view._sourceFilePath);
-            const title = this.getDisplayTitle(file);
-            view.setTitle(title);
-        });
-    }
-
-    updateVideoTitlesForFile(file) {
-        this.app.workspace.getLeavesOfType(VIEW_TYPE_WEB).forEach(leaf => {
-            const view = leaf.view;
-            if (view?._sourceFilePath !== file.path) return;
-            const title = this.getDisplayTitle(file);
-            view.setTitle(title);
-        });
-    }
+    updateAllDisplayTitles() { this.updateDisplayTitles(); }
+    updateDisplayTitleForFile(file) { this.updateDisplayTitles(file); }
 
     updateLeafDisplayTitle(leaf) {
         const view = leaf.view;
@@ -1773,74 +1967,47 @@ class ElegancePlugin extends Plugin {
             }
         }
 
-        // Add navigate-to-note button
+        // Add nav / snap / delete buttons
         const src = embed.getAttribute('src') ||
                     embed.closest('.internal-embed')?.getAttribute('src') || '';
         if (src) {
-            const btn = document.createElement('span');
-            btn.className = 'elegance-embed-nav-btn';
-            btn.setAttribute('aria-label', 'Open note');
-            setIcon(btn, 'maximize-2');
-            btn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
+            const makeBtn = (cls, label, icon, handler) => {
+                const btn = document.createElement('span');
+                btn.className = `elegance-embed-btn ${cls}`;
+                btn.setAttribute('aria-label', label);
+                setIcon(btn, icon);
+                btn.addEventListener('click', (e) => {
+                    e.preventDefault();
+                    e.stopPropagation();
+                    handler(e);
+                });
+                embed.prepend(btn);
+                return btn;
+            };
+
+            makeBtn('elegance-embed-nav-btn', 'Open note', 'maximize-2', () => {
                 const file = this.app.metadataCache.getFirstLinkpathDest(src.split('#')[0], '');
-                if (file) {
-                    this.app.workspace.openLinkText(file.path, '', false);
-                }
+                if (file) this.app.workspace.openLinkText(file.path, '', false);
             });
-            embed.prepend(btn);
 
-            // Add transclude-snapshot button (to the left of nav button)
-            const snapBtn = document.createElement('span');
-            snapBtn.className = 'elegance-embed-snap-btn';
-            snapBtn.setAttribute('aria-label', 'Replace embed with content');
-            setIcon(snapBtn, 'anchor');
-            snapBtn.addEventListener('click', async (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-
+            makeBtn('elegance-embed-snap-btn', 'Replace embed with content', 'anchor', async () => {
                 const linkPath = src.split('#')[0];
                 const subpath = src.includes('#') ? src.split('#').slice(1).join('#') : '';
                 const file = this.app.metadataCache.getFirstLinkpathDest(linkPath, '');
-                if (!file) {
-                    new Notice('Cannot resolve embedded file.');
-                    return;
-                }
+                if (!file) { new Notice('Cannot resolve embedded file.'); return; }
 
-                // Find the leaf containing this embed via DOM
-                const leafEl = embed.closest('.workspace-leaf');
-                const leaves = this.app.workspace.getLeavesOfType('markdown');
-                const leaf = leaves.find(l => l.containerEl === leafEl);
-                if (!leaf || !(leaf.view instanceof MarkdownView) || !leaf.view.editor) {
-                    new Notice('No active editor found.');
-                    return;
-                }
-                const editor = leaf.view.editor;
-                const sourceContent = editor.getValue();
+                const located = this.findEmbedInEditor(embed, src);
+                if (!located) return;
+                const { editor, from, to, scrollInfo } = located;
 
-                // Find the ![[src]] syntax in the source (with optional |display text)
-                const escapedSrc = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const embedRegex = new RegExp('!\\[\\[' + escapedSrc + '(\\|[^\\]]*)?\\]\\]');
-                const match = sourceContent.match(embedRegex);
-                if (!match) {
-                    new Notice('Could not find embed syntax in source.');
-                    return;
-                }
-
-                // Read the embedded file
                 let embeddedContent;
                 try {
                     embeddedContent = await this.app.vault.cachedRead(file);
-                } catch (err) {
+                } catch {
                     new Notice('Could not read embedded file.');
                     return;
                 }
-
-                // Strip frontmatter
                 embeddedContent = embeddedContent.replace(/^---\n[\s\S]*?\n---\n?/, '');
-
-                // Extract section if #heading is present
                 if (subpath) {
                     embeddedContent = this.extractSection(embeddedContent, subpath);
                     if (!embeddedContent) {
@@ -1849,82 +2016,26 @@ class ElegancePlugin extends Plugin {
                     }
                 }
 
-                // Determine heading context and build title + shifted content
                 const contextLevel = this.findContextHeadingLevel(embed);
                 const titleLevel = Math.min(contextLevel + 1, 6);
                 const titleText = subpath || file.basename;
                 const titleLine = '#'.repeat(titleLevel) + ' ' + titleText;
+                const shifted = this.shiftHeadingsInText(embeddedContent, titleLevel + 1);
+                const finalContent = titleLine + '\n' + shifted;
 
-                // Shift all headings in the content so they sit below the title
-                const targetTopLevel = titleLevel + 1;
-                const contentLines = embeddedContent.split('\n');
-                let minLevel = 7;
-                for (const line of contentLines) {
-                    const m = line.match(/^(#{1,6})\s/);
-                    if (m && m[1].length < minLevel) minLevel = m[1].length;
-                }
-                const shift = minLevel < 7 ? targetTopLevel - minLevel : 0;
-                if (shift > 0) {
-                    for (let i = 0; i < contentLines.length; i++) {
-                        contentLines[i] = contentLines[i].replace(/^(#{1,6})(\s)/, (_, hashes, sp) => {
-                            const newLevel = Math.min(hashes.length + shift, 6);
-                            return '#'.repeat(newLevel) + sp;
-                        });
-                    }
-                }
-
-                const finalContent = titleLine + '\n' + contentLines.join('\n');
-
-                // Replace the embed syntax with the content, preserving scroll
-                const matchIndex = sourceContent.indexOf(match[0]);
-                const from = editor.offsetToPos(matchIndex);
-                const to = editor.offsetToPos(matchIndex + match[0].length);
-                const scrollInfo = editor.getScrollInfo();
                 editor.replaceRange(finalContent.trimEnd(), from, to);
-                // Defer scroll restoration so it runs after Obsidian's live-preview re-render
                 requestAnimationFrame(() => editor.scrollTo(scrollInfo.left, scrollInfo.top));
-
                 new Notice('Embed replaced with content snapshot.');
             });
-            embed.prepend(snapBtn);
 
-            // Add delete-embed button (rightmost)
-            const delBtn = document.createElement('span');
-            delBtn.className = 'elegance-embed-del-btn';
-            delBtn.setAttribute('aria-label', 'Delete embed');
-            setIcon(delBtn, 'trash-2');
-            delBtn.addEventListener('click', (e) => {
-                e.preventDefault();
-                e.stopPropagation();
-
-                const leafEl = embed.closest('.workspace-leaf');
-                const leaves = this.app.workspace.getLeavesOfType('markdown');
-                const leaf = leaves.find(l => l.containerEl === leafEl);
-                if (!leaf || !(leaf.view instanceof MarkdownView) || !leaf.view.editor) {
-                    new Notice('No active editor found.');
-                    return;
-                }
-                const editor = leaf.view.editor;
-                const sourceContent = editor.getValue();
-
-                const escapedSrc = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                const embedRegex = new RegExp('!\\[\\[' + escapedSrc + '(\\|[^\\]]*)?\\]\\]');
-                const match = sourceContent.match(embedRegex);
-                if (!match) {
-                    new Notice('Could not find embed syntax in source.');
-                    return;
-                }
-
-                const matchIndex = sourceContent.indexOf(match[0]);
-                const from = editor.offsetToPos(matchIndex);
-                const to = editor.offsetToPos(matchIndex + match[0].length);
-                const scrollInfo = editor.getScrollInfo();
+            makeBtn('elegance-embed-del-btn', 'Delete embed', 'trash-2', () => {
+                const located = this.findEmbedInEditor(embed, src);
+                if (!located) return;
+                const { editor, from, to, scrollInfo } = located;
                 editor.replaceRange('', from, to);
                 requestAnimationFrame(() => editor.scrollTo(scrollInfo.left, scrollInfo.top));
-
                 new Notice('Embed deleted.');
             });
-            embed.prepend(delBtn);
         }
 
         // Click-to-edit: track hover position, then open source at that exact caret
@@ -2018,18 +2129,55 @@ class ElegancePlugin extends Plugin {
         }
 
         embed.classList.add('elegance-embed-seamless');
+    }
 
-        // Apply accent left bar — inline !important beats everything
-        embed.style.setProperty('border-left', '1px solid color-mix(in srgb, var(--interactive-accent) 25%, transparent)', 'important');
-        embed.style.setProperty('margin-left', '-4px', 'important');
-        embed.style.setProperty('padding-left', '3px', 'important');
-        embed.style.setProperty('transition', 'border-color 150ms ease');
-        embed.addEventListener('mouseenter', () => {
-            embed.style.setProperty('border-left-color', 'var(--interactive-accent)', 'important');
-        });
-        embed.addEventListener('mouseleave', () => {
-            embed.style.setProperty('border-left-color', 'color-mix(in srgb, var(--interactive-accent) 25%, transparent)', 'important');
-        });
+    /**
+     * Locate the editor and source-text range for an embed DOM element.
+     * Returns { editor, from, to, scrollInfo } or null (with a Notice on failure).
+     */
+    findEmbedInEditor(embedEl, src) {
+        const leafEl = embedEl.closest('.workspace-leaf');
+        const leaf = this.app.workspace.getLeavesOfType('markdown').find(l => l.containerEl === leafEl);
+        if (!leaf || !(leaf.view instanceof MarkdownView) || !leaf.view.editor) {
+            new Notice('No active editor found.');
+            return null;
+        }
+        const editor = leaf.view.editor;
+        const sourceContent = editor.getValue();
+        const escapedSrc = src.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+        const embedRegex = new RegExp('!\\[\\[' + escapedSrc + '(\\|[^\\]]*)?\\]\\]');
+        const match = sourceContent.match(embedRegex);
+        if (!match) {
+            new Notice('Could not find embed syntax in source.');
+            return null;
+        }
+        const matchIndex = sourceContent.indexOf(match[0]);
+        return {
+            editor,
+            from: editor.offsetToPos(matchIndex),
+            to: editor.offsetToPos(matchIndex + match[0].length),
+            scrollInfo: editor.getScrollInfo(),
+        };
+    }
+
+    /** Shift all markdown headings in `text` so the topmost becomes `targetTopLevel`. */
+    shiftHeadingsInText(text, targetTopLevel) {
+        const lines = text.split('\n');
+        let minLevel = 7;
+        for (const line of lines) {
+            const m = line.match(/^(#{1,6})\s/);
+            if (m && m[1].length < minLevel) minLevel = m[1].length;
+        }
+        const shift = minLevel < 7 ? targetTopLevel - minLevel : 0;
+        if (shift > 0) {
+            for (let i = 0; i < lines.length; i++) {
+                lines[i] = lines[i].replace(/^(#{1,6})(\s)/, (_, hashes, sp) => {
+                    const newLevel = Math.min(hashes.length + shift, 6);
+                    return '#'.repeat(newLevel) + sp;
+                });
+            }
+        }
+        return lines.join('\n');
     }
 
     flashCaretLine(view) {
@@ -2158,25 +2306,8 @@ class ElegancePlugin extends Plugin {
             const titleText = subpath || target.basename;
             const titleLine = '#'.repeat(titleLevel) + ' ' + titleText;
 
-            // Shift headings in the content
-            const contentLines = embeddedContent.split('\n');
-            const targetTopLevel = titleLevel + 1;
-            let minLevel = 7;
-            for (const line of contentLines) {
-                const m = line.match(/^(#{1,6})\s/);
-                if (m && m[1].length < minLevel) minLevel = m[1].length;
-            }
-            const shift = minLevel < 7 ? targetTopLevel - minLevel : 0;
-            if (shift > 0) {
-                for (let j = 0; j < contentLines.length; j++) {
-                    contentLines[j] = contentLines[j].replace(/^(#{1,6})(\s)/, (_, hashes, sp) => {
-                        const newLevel = Math.min(hashes.length + shift, 6);
-                        return '#'.repeat(newLevel) + sp;
-                    });
-                }
-            }
-
-            const finalContent = titleLine + '\n' + contentLines.join('\n').trimEnd();
+            const shifted = this.shiftHeadingsInText(embeddedContent, titleLevel + 1);
+            const finalContent = titleLine + '\n' + shifted.trimEnd();
             changes.push({ from: match.index, to: match.index + match[0].length, insert: finalContent });
         }
 
@@ -2220,313 +2351,6 @@ class ElegancePlugin extends Plugin {
         }
 
         return lines.slice(startLine, endLine).join('\n');
-    }
-}
-
-/* ================================================================
-   Icon picker modal
-   ================================================================ */
-
-class IconPickerModal extends SuggestModal {
-    constructor(app, plugin, propertyKey) {
-        super(app);
-        this.plugin = plugin;
-        this.propertyKey = propertyKey;
-        this.allIcons = getIconIds();
-        this.setPlaceholder('Search icons\u2026');
-    }
-
-    getSuggestions(query) {
-        const q = query.toLowerCase();
-        if (!q) return this.allIcons.slice(0, 100);
-        return this.allIcons.filter(id => id.toLowerCase().includes(q));
-    }
-
-    renderSuggestion(iconId, el) {
-        el.addClass('elegance-icon-suggestion');
-        const svg = getIcon(iconId);
-        if (svg) el.appendChild(svg);
-        el.createSpan({ text: iconId });
-    }
-
-    async onChooseSuggestion(iconId) {
-        this.plugin.settings.propertyIcons[this.propertyKey.toLowerCase()] = iconId;
-        await this.plugin.saveSettings();
-        this.plugin.applyPropertyIcons();
-    }
-}
-
-/* ================================================================
-   Settings tab
-   ================================================================ */
-
-class EleganceSettingTab extends PluginSettingTab {
-    constructor(app, plugin) {
-        super(app, plugin);
-        this.plugin = plugin;
-    }
-
-    display() {
-        const { containerEl } = this;
-        containerEl.empty();
-
-        new Setting(containerEl)
-            .setName('Collapse properties')
-            .setDesc('Automatically collapse the frontmatter properties section when opening a note.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.collapseProperties)
-                .onChange(async (value) => {
-                    this.plugin.settings.collapseProperties = value;
-                    await this.plugin.saveSettings();
-                }));
-
-        new Setting(containerEl)
-            .setName('Better embeds')
-            .setDesc('Seamless note embedding with heading hierarchy, click-to-edit, and accent hover bar.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.betterEmbeds)
-                .onChange(async (value) => {
-                    this.plugin.settings.betterEmbeds = value;
-                    await this.plugin.saveSettings();
-                    // Reload plugin to apply
-                    await this.plugin.app.plugins.disablePlugin('elegance');
-                    await this.plugin.app.plugins.enablePlugin('elegance');
-                }));
-
-        /* ---------- Review folders ---------- */
-        containerEl.createEl('h3', { text: 'Review folders' });
-        containerEl.createEl('p', {
-            text: 'The "Mark as reviewed" action only appears for notes inside these folders. Leave empty to show it everywhere.',
-            cls: 'setting-item-description',
-        });
-
-        const reviewFolders = this.plugin.settings.reviewFolders;
-        for (let i = 0; i < reviewFolders.length; i++) {
-            const folder = reviewFolders[i];
-            new Setting(containerEl)
-                .setName(folder)
-                .addExtraButton(btn => btn
-                    .setIcon('x')
-                    .setTooltip('Remove')
-                    .onClick(async () => {
-                        this.plugin.settings.reviewFolders.splice(i, 1);
-                        await this.plugin.saveSettings();
-                        this.plugin.updateActionIcons();
-                        this.display();
-                    }));
-        }
-
-        let newReviewFolder = '';
-        new Setting(containerEl)
-            .setName('Add folder')
-            .addText(text => text
-                .setPlaceholder('Folder name')
-                .onChange(v => { newReviewFolder = v; }))
-            .addButton(btn => btn
-                .setButtonText('+')
-                .onClick(async () => {
-                    const name = newReviewFolder.trim();
-                    if (name && !this.plugin.settings.reviewFolders.includes(name)) {
-                        this.plugin.settings.reviewFolders.push(name);
-                        await this.plugin.saveSettings();
-                        this.plugin.updateActionIcons();
-                        this.display();
-                    }
-                }));
-
-        /* ---------- Property icons ---------- */
-        containerEl.createEl('h3', { text: 'Property icons' });
-        containerEl.createEl('p', {
-            text: 'Override the default icon for a frontmatter property. Use any Lucide icon name (e.g. "calendar", "tag", "link", "flask-conical").',
-            cls: 'setting-item-description',
-        });
-
-        const iconMap = this.plugin.settings.propertyIcons;
-        for (const [prop, icon] of Object.entries(iconMap)) {
-            const row = new Setting(containerEl)
-                .setName(prop)
-                .addText(text => text
-                    .setValue(icon)
-                    .setPlaceholder('Icon name')
-                    .onChange(async (value) => {
-                        if (value.trim()) {
-                            this.plugin.settings.propertyIcons[prop] = value.trim();
-                        } else {
-                            delete this.plugin.settings.propertyIcons[prop];
-                        }
-                        await this.plugin.saveSettings();
-                        this.plugin.applyPropertyIcons();
-                        // Update preview
-                        const preview = row.settingEl.querySelector('.elegance-icon-preview');
-                        if (preview) setIcon(preview, value.trim() || 'help-circle');
-                    }))
-                .addExtraButton(btn => btn
-                    .setIcon('x')
-                    .setTooltip('Remove')
-                    .onClick(async () => {
-                        delete this.plugin.settings.propertyIcons[prop];
-                        await this.plugin.saveSettings();
-                        this.plugin.applyPropertyIcons();
-                        this.display();
-                    }));
-            // Add icon preview
-            const preview = row.settingEl.createSpan({ cls: 'elegance-icon-preview' });
-            row.settingEl.querySelector('.setting-item-control').prepend(preview);
-            setIcon(preview, icon);
-        }
-
-        let newIconProp = '';
-        let newIconName = '';
-        new Setting(containerEl)
-            .setName('Add property icon')
-            .addText(text => text
-                .setPlaceholder('Property name')
-                .onChange(v => { newIconProp = v; }))
-            .addText(text => text
-                .setPlaceholder('Icon name')
-                .onChange(v => { newIconName = v; }))
-            .addButton(btn => btn
-                .setButtonText('+')
-                .onClick(async () => {
-                    if (newIconProp.trim() && newIconName.trim()) {
-                        this.plugin.settings.propertyIcons[newIconProp.trim().toLowerCase()] = newIconName.trim();
-                        await this.plugin.saveSettings();
-                        this.plugin.applyPropertyIcons();
-                        this.display();
-                    }
-                }));
-
-        /* ---------- Hidden properties ---------- */
-        containerEl.createEl('h3', { text: 'Hidden properties' });
-        containerEl.createEl('p', {
-            text: 'Properties hidden from the frontmatter panel. Right-click a property icon to hide/unhide, or manage them here.',
-            cls: 'setting-item-description',
-        });
-
-        const hiddenProps = this.plugin.settings.hiddenProperties;
-        for (let i = 0; i < hiddenProps.length; i++) {
-            const prop = hiddenProps[i];
-            new Setting(containerEl)
-                .setName(prop)
-                .addExtraButton(btn => btn
-                    .setIcon('x')
-                    .setTooltip('Unhide')
-                    .onClick(async () => {
-                        this.plugin.settings.hiddenProperties.splice(i, 1);
-                        await this.plugin.saveSettings();
-                        this.plugin.markHiddenProperties();
-                        this.display();
-                    }));
-        }
-
-        let newHiddenProp = '';
-        new Setting(containerEl)
-            .setName('Hide property')
-            .addText(text => text
-                .setPlaceholder('Property name')
-                .onChange(v => { newHiddenProp = v; }))
-            .addButton(btn => btn
-                .setButtonText('+')
-                .onClick(async () => {
-                    const name = newHiddenProp.trim().toLowerCase();
-                    if (name && !this.plugin.settings.hiddenProperties.some(p => p.toLowerCase() === name)) {
-                        this.plugin.settings.hiddenProperties.push(name);
-                        await this.plugin.saveSettings();
-                        this.plugin.markHiddenProperties();
-                        this.display();
-                    }
-                }));
-
-        /* ---------- Hidden folders ---------- */
-        containerEl.createEl('h3', { text: 'Hidden folders' });
-
-        const hiddenFolders = this.plugin.settings.hiddenFolders;
-        for (let i = 0; i < hiddenFolders.length; i++) {
-            const folder = hiddenFolders[i];
-            new Setting(containerEl)
-                .setName(folder)
-                .addExtraButton(btn => btn
-                    .setIcon('x')
-                    .setTooltip('Unhide')
-                    .onClick(async () => {
-                        this.plugin.settings.hiddenFolders.splice(i, 1);
-                        await this.plugin.saveSettings();
-                        this.plugin.withExplorerPaused(() => this.plugin.hideExplorerFolders());
-                        this.display();
-                    }));
-        }
-
-        let newHiddenFolder = '';
-        new Setting(containerEl)
-            .setName('Hide folder')
-            .addText(text => text
-                .setPlaceholder('Folder name')
-                .onChange(v => { newHiddenFolder = v; }))
-            .addButton(btn => btn
-                .setButtonText('+')
-                .onClick(async () => {
-                    const name = newHiddenFolder.trim();
-                    if (name && !this.plugin.settings.hiddenFolders.includes(name)) {
-                        this.plugin.settings.hiddenFolders.push(name);
-                        await this.plugin.saveSettings();
-                        this.plugin.withExplorerPaused(() => this.plugin.hideExplorerFolders());
-                        this.display();
-                    }
-                }));
-
-        /* ---------- Folder display names ---------- */
-        containerEl.createEl('h3', { text: 'Folder display names' });
-        containerEl.createEl('p', {
-            text: 'Number prefixes (e.g. "1-10, ") and module codes (e.g. "LF111 ") are stripped automatically. Add overrides below for custom names.',
-            cls: 'setting-item-description',
-        });
-
-        const map = this.plugin.settings.folderDisplayNames;
-        for (const [path, name] of Object.entries(map)) {
-            new Setting(containerEl)
-                .setName(path)
-                .addText(text => text
-                    .setValue(name)
-                    .onChange(async (value) => {
-                        if (value.trim()) {
-                            this.plugin.settings.folderDisplayNames[path] = value.trim();
-                        } else {
-                            delete this.plugin.settings.folderDisplayNames[path];
-                        }
-                        await this.plugin.saveSettings();
-                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
-                    }))
-                .addExtraButton(btn => btn
-                    .setIcon('x')
-                    .setTooltip('Remove override')
-                    .onClick(async () => {
-                        delete this.plugin.settings.folderDisplayNames[path];
-                        await this.plugin.saveSettings();
-                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
-                        this.display();
-                    }));
-        }
-
-        let newPath = '';
-        let newName = '';
-        new Setting(containerEl)
-            .setName('Add override')
-            .addText(text => text
-                .setPlaceholder('Folder path')
-                .onChange(v => { newPath = v; }))
-            .addText(text => text
-                .setPlaceholder('Display name')
-                .onChange(v => { newName = v; }))
-            .addButton(btn => btn
-                .setButtonText('+')
-                .onClick(async () => {
-                    if (newPath.trim() && newName.trim()) {
-                        this.plugin.settings.folderDisplayNames[newPath.trim()] = newName.trim();
-                        await this.plugin.saveSettings();
-                        this.plugin.withExplorerPaused(() => this.plugin.renameExplorerFolders());
-                        this.display();
-                    }
-                }));
     }
 }
 
