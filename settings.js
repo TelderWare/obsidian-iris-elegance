@@ -14,6 +14,7 @@ const DEFAULT_SETTINGS = {
     collapseProperties: true,
     reviewFolders: ['Lectures', 'Glossary'],
     proseOn: false,
+    hiddenStatusBarItems: [],
     actionButtons: [
         'elegance:open-download-link',
         'iris-course:open-video-link',
@@ -383,6 +384,39 @@ class EleganceSettingTab extends PluginSettingTab {
                         this.display();
                     }
                 }));
+
+        /* ---------- Hidden status bar items ---------- */
+        containerEl.createEl('h3', { text: 'Hidden status bar items' });
+        containerEl.createEl('p', {
+            text: 'Toggle off items you want to hide from the status bar.',
+            cls: 'setting-item-description',
+        });
+
+        const statusBar = document.querySelector('.status-bar');
+        if (statusBar) {
+            const items = statusBar.querySelectorAll('.status-bar-item');
+            const hidden = this.plugin.settings.hiddenStatusBarItems;
+            for (const item of items) {
+                const id = this.plugin.getStatusBarItemId(item);
+                if (!id) continue;
+                const label = this.plugin.getStatusBarItemLabel(item);
+                new Setting(containerEl)
+                    .setName(label)
+                    .setDesc(id)
+                    .addToggle(toggle => toggle
+                        .setValue(!hidden.includes(id))
+                        .onChange(async (visible) => {
+                            const idx = hidden.indexOf(id);
+                            if (visible && idx !== -1) {
+                                hidden.splice(idx, 1);
+                            } else if (!visible && idx === -1) {
+                                hidden.push(id);
+                            }
+                            await this.plugin.saveSettings();
+                            this.plugin.hideStatusBarItems();
+                        }));
+            }
+        }
     }
 }
 

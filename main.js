@@ -596,6 +596,7 @@ const DEFAULT_SETTINGS = {
     collapseProperties: true,
     reviewFolders: ['Lectures', 'Glossary'],
     proseOn: false,
+    hiddenStatusBarItems: [],
     actionButtons: [
         'elegance:open-download-link',
         'iris-course:open-video-link',
@@ -965,6 +966,39 @@ class EleganceSettingTab extends PluginSettingTab {
                         this.display();
                     }
                 }));
+
+        /* ---------- Hidden status bar items ---------- */
+        containerEl.createEl('h3', { text: 'Hidden status bar items' });
+        containerEl.createEl('p', {
+            text: 'Toggle off items you want to hide from the status bar.',
+            cls: 'setting-item-description',
+        });
+
+        const statusBar = document.querySelector('.status-bar');
+        if (statusBar) {
+            const items = statusBar.querySelectorAll('.status-bar-item');
+            const hidden = this.plugin.settings.hiddenStatusBarItems;
+            for (const item of items) {
+                const id = this.plugin.getStatusBarItemId(item);
+                if (!id) continue;
+                const label = this.plugin.getStatusBarItemLabel(item);
+                new Setting(containerEl)
+                    .setName(label)
+                    .setDesc(id)
+                    .addToggle(toggle => toggle
+                        .setValue(!hidden.includes(id))
+                        .onChange(async (visible) => {
+                            const idx = hidden.indexOf(id);
+                            if (visible && idx !== -1) {
+                                hidden.splice(idx, 1);
+                            } else if (!visible && idx === -1) {
+                                hidden.push(id);
+                            }
+                            await this.plugin.saveSettings();
+                            this.plugin.hideStatusBarItems();
+                        }));
+            }
+        }
     }
 }
 
@@ -1004,6 +1038,7 @@ class ElegancePlugin extends Plugin {
             this.withExplorerPaused(() => this.updateExplorerFolders());
             this.setupExplorerObserver();
             this.setupPropertyIconObserver();
+            this.hideStatusBarItems();
             setTimeout(() => this.collapseAllProperties(), 200);
         });
 
@@ -1049,6 +1084,7 @@ class ElegancePlugin extends Plugin {
                     this.applyPropertyIcons();
                     if (!this.explorerObserver) this.setupExplorerObserver();
                     this.withExplorerPaused(() => this.updateExplorerFolders());
+                    this.hideStatusBarItems();
                 }, 100);
             })
         );
@@ -1168,6 +1204,37 @@ class ElegancePlugin extends Plugin {
         this.updateAllDisplayTitles();
     }
 
+    /* ============================================================
+       Status bar — hide items
+       ============================================================ */
+
+    getStatusBarItemId(el) {
+        for (const cls of el.classList) {
+            if (cls !== 'status-bar-item' && cls.startsWith('plugin-')) return cls;
+        }
+        const text = el.textContent.trim().slice(0, 50);
+        return text || null;
+    }
+
+    getStatusBarItemLabel(el) {
+        for (const cls of el.classList) {
+            if (cls !== 'status-bar-item' && cls.startsWith('plugin-')) {
+                return cls.replace('plugin-', '').replace(/-/g, ' ');
+            }
+        }
+        return el.textContent.trim().slice(0, 50) || '(empty)';
+    }
+
+    hideStatusBarItems() {
+        const hidden = this.settings.hiddenStatusBarItems || [];
+        const statusBar = document.querySelector('.status-bar');
+        if (!statusBar) return;
+        for (const item of statusBar.querySelectorAll('.status-bar-item')) {
+            const id = this.getStatusBarItemId(item);
+            item.classList.toggle('elegance-statusbar-hidden', !!(id && hidden.includes(id)));
+        }
+    }
+
     onunload() {
         for (const cls of [
             'elegance-fm-active',
@@ -1184,6 +1251,9 @@ class ElegancePlugin extends Plugin {
             '.elegance-embed-btn',
         ]) document.querySelectorAll(sel).forEach(el => el.remove());
 
+        document.querySelectorAll('.elegance-statusbar-hidden').forEach(el => {
+            el.classList.remove('elegance-statusbar-hidden');
+        });
         document.querySelectorAll('.elegance-prop-hidden').forEach(el => {
             el.classList.remove('elegance-prop-hidden');
         });
@@ -1206,20 +1276,6 @@ class ElegancePlugin extends Plugin {
        ============================================================ */
 
     registerActionCommands() {
-        this.addCommand({
-            id: 'open-download-link',
-            name: 'Open download link',
-            icon: 'download',
-            checkCallback: (checking) => {
-                const file = this.app.workspace.getActiveFile();
-                if (!file) return false;
-                const raw = this.app.metadataCache.getFileCache(file)?.frontmatter?.download;
-                if (!raw || typeof raw !== 'string' || !raw.trim()) return false;
-                if (!checking) window.open(raw.trim(), '_blank');
-                return true;
-            },
-        });
-
         this.addCommand({
             id: 'open-slideshow',
             name: 'Open slideshow',
@@ -1336,7 +1392,7 @@ class ElegancePlugin extends Plugin {
 
             const icon = document.createElement('span');
             icon.className = 'elegance-fm-action';
-            icon.setAttribute('aria-label', cmd.name);
+            icon.setAttribute('aria-label', cmd.name.replace(/^[^:]+:\s*/, ''));
             icon.dataset.commandId = id;
             const iconName = this.settings.actionIcons[id] || cmd.icon || 'terminal';
             setIcon(icon, iconName);

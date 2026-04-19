@@ -26,13 +26,14 @@ body.elegance-fm-active .metadata-properties-heading {
     gap: 7px;
     width: auto !important;
     flex: 0 0 auto !important;
+    padding: 0;
 }
 
 body.elegance-fm-active .elegance-fm-actions {
     display: flex;
     align-items: center;
     gap: 7px;
-    margin-left: 7px;
+    margin-left: 2px;
     align-self: stretch;
     padding: inherit;
 }
@@ -177,6 +178,14 @@ body:not(.elegance-show-hidden) .hover-popover .metadata-property.elegance-prop-
     overflow: hidden;
     clip: rect(0, 0, 0, 0);
     border: 0;
+}
+
+/* =============================================================
+   HIDDEN STATUS BAR ITEMS
+   ============================================================= */
+
+.status-bar-item.elegance-statusbar-hidden {
+    display: none !important;
 }
 
 /* =============================================================
@@ -385,6 +394,11 @@ body:not(.elegance-show-hidden) .hover-popover .metadata-property.elegance-prop-
 .elegance-prose-status {
     opacity: 0.6;
     font-style: italic;
+}
+
+/* Hide heading marks (# ## ### etc. and trailing space) in prose mode */
+body.elegance-prose-on .cm-formatting-header {
+    display: none !important;
 }
 
 /* Hide markdown formatting marks even on the active line.
