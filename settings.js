@@ -13,8 +13,17 @@ const DEFAULT_SETTINGS = {
     betterEmbeds: true,
     collapseProperties: true,
     reviewFolders: ['Lectures', 'Glossary'],
-    proseOn: false,
     hiddenStatusBarItems: [],
+    customWordCount: true,
+    wcIncludeHeadings: false,
+    wcIncludeCodeBlocks: false,
+    wcIncludeFrontmatter: false,
+    wcIncludeComments: false,
+    wcIncludeBlockQuotes: false,
+    wcIncludeFootnotes: false,
+    wcIncludeCitations: false,
+    wcIncludeTables: false,
+    wcIncludeMath: false,
     actionButtons: [
         'elegance:open-download-link',
         'iris-course:open-video-link',
@@ -33,17 +42,6 @@ class EleganceSettingTab extends PluginSettingTab {
     display() {
         const { containerEl } = this;
         containerEl.empty();
-
-        new Setting(containerEl)
-            .setName('Prose mode')
-            .setDesc('Hide markdown syntax (headings, emphasis, links) even on the active line. Toggle anytime via the ribbon icon or command palette.')
-            .addToggle(toggle => toggle
-                .setValue(this.plugin.settings.proseOn)
-                .onChange(async (value) => {
-                    this.plugin.settings.proseOn = value;
-                    this.plugin.applyProseToAll(value);
-                    await this.plugin.saveSettings();
-                }));
 
         new Setting(containerEl)
             .setName('Collapse properties')
@@ -391,6 +389,31 @@ class EleganceSettingTab extends PluginSettingTab {
             text: 'Toggle off items you want to hide from the status bar.',
             cls: 'setting-item-description',
         });
+
+        new Setting(containerEl)
+            .setName('Custom word count')
+            .setDesc('Replace the vanilla word count item with one that shows only words. Click the item in the status bar to toggle what is counted.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.customWordCount)
+                .onChange(async (value) => {
+                    this.plugin.settings.customWordCount = value;
+                    await this.plugin.saveSettings();
+                    this.plugin.applyCustomWordCount();
+                    this.display();
+                }));
+
+        if (this.plugin.settings.customWordCount && this.plugin.isVanillaWordCountEnabled()) {
+            new Setting(containerEl)
+                .setName('Vanilla word count is still running')
+                .setDesc('Obsidian’s built-in Word count core plugin is still enabled, so both counters are running side by side. Disable it for the performance benefit.')
+                .addButton(btn => btn
+                    .setButtonText('Disable vanilla word count')
+                    .setCta()
+                    .onClick(async () => {
+                        await this.plugin.disableVanillaWordCount();
+                        this.display();
+                    }));
+        }
 
         const statusBar = document.querySelector('.status-bar');
         if (statusBar) {

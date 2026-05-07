@@ -1,3 +1,6 @@
 data.json
 debug.log
 node_modules/
+
+.claude/
+main.js.bak
