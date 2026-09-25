@@ -335,3 +335,48 @@ body:not(.elegance-show-hidden) .hover-popover .metadata-property.elegance-prop-
 .elegance-embed-nav-btn { right: 26px; }
 .elegance-embed-snap-btn { right: 48px; }
 
+
+/* =============================================================
+   MOBILE — larger touch targets for action buttons
+   ============================================================= */
+
+/* Frontmatter actions: 36px hit area around a 22px icon */
+body.is-mobile.elegance-fm-active .elegance-fm-actions {
+    gap: 2px;
+}
+
+body.is-mobile.elegance-fm-active .metadata-properties-title {
+    width: 22px;
+    height: 22px;
+}
+
+body.is-mobile.elegance-fm-active .elegance-fm-action {
+    width: 36px;
+    height: 36px;
+    opacity: 0.6;
+}
+
+body.is-mobile.elegance-fm-active .elegance-fm-action svg {
+    width: 22px;
+    height: 22px;
+}
+
+/* Embed buttons: 36px hit area, and always visible since touch has no hover */
+body.is-mobile .elegance-embed-btn {
+    top: 0;
+    width: 36px;
+    height: 36px;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    opacity: 1;
+}
+
+body.is-mobile .elegance-embed-btn svg {
+    width: 20px;
+    height: 20px;
+}
+
+body.is-mobile .elegance-embed-del-btn { right: 0; }
+body.is-mobile .elegance-embed-nav-btn { right: 36px; }
+body.is-mobile .elegance-embed-snap-btn { right: 72px; }
